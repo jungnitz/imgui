@@ -343,7 +343,7 @@ struct ImGuiID {
     ImGuiID push(const void* data, size_t data_size) const;
 
     // Hash of the complete ID stack until this ID
-    ImGuiIDNum hash_stack() const { return node_->hash; }
+    ImGuiIDNum hash_stack() const { return node_ == nullptr ? 0 : (*node_)->hash; }
 
     friend bool operator==(ImGuiID const& id1, ImGuiID const& id2);
 
@@ -368,10 +368,7 @@ private:
 
     ImGuiID(std::shared_ptr<Node> node);
 
-    bool initialized = true; // for catching 0-memory-initialized ids which would throw a SEGFAULT
-    union {
-        std::shared_ptr<Node> node_;
-    };
+    std::shared_ptr<Node>* node_ = nullptr;
 
 };
 
@@ -2558,6 +2555,14 @@ struct ImGuiStorage
     using MapType = std::unordered_map<ImGuiID, Value, ImGuiIDHasher>;
     MapType& Map() const;
 
+    ImGuiStorage() = default;
+
+    ImGuiStorage(ImGuiStorage const&) = delete;
+    ImGuiStorage(ImGuiStorage&&) = delete;
+    
+    ImGuiStorage& operator=(ImGuiStorage const&) = delete;
+    ImGuiStorage& operator=(ImGuiStorage&&) = delete;
+
     ~ImGuiStorage();
 
     // - Get***() functions find pair, never add/allocate. Pairs are sorted so a query is O(log N)
@@ -2588,7 +2593,7 @@ struct ImGuiStorage
     IMGUI_API void      SetAllInt(int val);
 
 private:
-    mutable std::unordered_map<ImGuiID, Value, ImGuiIDHasher>*  map;
+    mutable std::unordered_map<ImGuiID, Value, ImGuiIDHasher>*  map = nullptr;
 };
 
 // Helper: Manually clip large list of items.
