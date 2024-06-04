@@ -305,13 +305,18 @@ struct ImZero {
 };
 
 struct ImGuiID {
-    using IdStack = std::vector<ImGuiIDNum>;
-
     static ImGuiID INVALID;
     static ImGuiID ROOT;
 
     // Constructs an invalid ImGuiID
     ImGuiID();
+    ~ImGuiID();
+
+    ImGuiID(ImGuiID const&);
+    ImGuiID(ImGuiID&&) noexcept;
+
+    ImGuiID& operator=(ImGuiID const&);
+    ImGuiID& operator=(ImGuiID&&) noexcept;
 
     static ImGuiID specialValue(ImGuiIDNum hash) {
         if (hash == 0) return ImGuiID::INVALID;
@@ -350,6 +355,7 @@ struct ImGuiID {
         return id.valid();
     }
 
+    friend void swap(ImGuiID &id1, ImGuiID &id2);
 
 private:
     struct Node {
@@ -362,7 +368,10 @@ private:
 
     ImGuiID(std::shared_ptr<Node> node);
 
-    std::shared_ptr<Node> node_ = nullptr;
+    bool initialized = true; // for catching 0-memory-initialized ids which would throw a SEGFAULT
+    union {
+        std::shared_ptr<Node> node_;
+    };
 
 };
 
@@ -2546,13 +2555,15 @@ struct ImGuiTextBuffer
 struct ImGuiStorage
 {
     union Value { int val_i; float val_f; void* val_p; };
-    std::unordered_map<ImGuiID, Value, ImGuiIDHasher> Map;
     using MapType = std::unordered_map<ImGuiID, Value, ImGuiIDHasher>;
+    MapType& Map() const;
+
+    ~ImGuiStorage();
 
     // - Get***() functions find pair, never add/allocate. Pairs are sorted so a query is O(log N)
     // - Set***() functions find pair, insertion on demand if missing.
     // - Sorted insertion is costly, paid once. A typical frame shouldn't need to insert any new pair.
-    void                Clear() { Map.clear(); }
+    void                Clear() { Map().clear(); }
     IMGUI_API int       GetInt(ImGuiID key, int default_val = 0) const;
     IMGUI_API void      SetInt(ImGuiID key, int val);
     IMGUI_API bool      GetBool(ImGuiID key, bool default_val = false) const;
@@ -2575,6 +2586,9 @@ struct ImGuiStorage
     IMGUI_API void      BuildSortByKey();
     // Obsolete: use on your own storage if you know only integer are being stored (open/close all tree nodes)
     IMGUI_API void      SetAllInt(int val);
+
+private:
+    mutable std::unordered_map<ImGuiID, Value, ImGuiIDHasher>*  map;
 };
 
 // Helper: Manually clip large list of items.

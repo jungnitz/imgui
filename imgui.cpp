@@ -1251,6 +1251,40 @@ bool operator==(const ImGuiID &id1, const ImGuiID &id2)
     return true;
 }
 
+ImGuiID::~ImGuiID()
+{
+    if (initialized) {
+        // node_.~shared_ptr<Node>();
+    }
+}
+
+ImGuiID::ImGuiID(const ImGuiID &other) : initialized(true), node_(other.initialized ? other.node_ : nullptr) { }
+
+ImGuiID::ImGuiID(ImGuiID &&other) noexcept : initialized(true), node_(other.initialized ? std::move(other.node_) : nullptr) { }
+
+ImGuiID &ImGuiID::operator=(const ImGuiID &other)
+{
+    ImGuiID copy(other);
+    swap(*this, copy);
+    return *this;
+}
+
+ImGuiID &ImGuiID::operator=(ImGuiID &&other) noexcept
+{
+    swap(*this, other);
+    return *this;
+}
+
+void swap(ImGuiID &id1, ImGuiID &id2) {
+    // swap by copying memory, should be fine probably
+    char buf[sizeof(ImGuiID)];
+    memcpy(&buf, &id1, sizeof(ImGuiID));
+    memcpy(&id1, &id2, sizeof(ImGuiID));
+    memcpy(&id2, &buf, sizeof(ImGuiID));
+}
+
+
+
 //-----------------------------------------------------------------------------
 // [SECTION] CONTEXT AND MEMORY ALLOCATORS
 //-----------------------------------------------------------------------------
@@ -2585,10 +2619,21 @@ void ImGuiStorage::BuildSortByKey()
     // Exists for compatibility
 }
 
+ImGuiStorage::MapType& ImGuiStorage::Map() const
+{
+    if (map == nullptr) map = new MapType();
+    return *map;
+}
+
+ImGuiStorage::~ImGuiStorage()
+{
+    delete map;
+}
+
 int ImGuiStorage::GetInt(ImGuiID key, int default_val) const
 {
-    auto it = Map.find(key);
-    if (it == Map.end()) return default_val;
+    auto it = Map().find(key);
+    if (it == Map().end()) return default_val;
     return it->second.val_i;
 }
 
@@ -2599,22 +2644,22 @@ bool ImGuiStorage::GetBool(ImGuiID key, bool default_val) const
 
 float ImGuiStorage::GetFloat(ImGuiID key, float default_val) const
 {
-    auto it = Map.find(key);
-    if (it == Map.end()) return default_val;
+    auto it = Map().find(key);
+    if (it == Map().end()) return default_val;
     return it->second.val_f;
 }
 
 void* ImGuiStorage::GetVoidPtr(ImGuiID key) const
 {
-    auto it = Map.find(key);
-    if (it == Map.end()) return nullptr;
+    auto it = Map().find(key);
+    if (it == Map().end()) return nullptr;
     return it->second.val_p;
 }
 
 // References are only valid until a new value is added to the storage. Calling a Set***() function or a Get***Ref() function invalidates the pointer.
 int* ImGuiStorage::GetIntRef(ImGuiID key, int default_val)
 {
-    return &Map.try_emplace(key, Value{.val_i=default_val}).first->second.val_i;
+    return &Map().try_emplace(key, Value{.val_i=default_val}).first->second.val_i;
 }
 
 bool* ImGuiStorage::GetBoolRef(ImGuiID key, bool default_val)
@@ -2624,18 +2669,18 @@ bool* ImGuiStorage::GetBoolRef(ImGuiID key, bool default_val)
 
 float* ImGuiStorage::GetFloatRef(ImGuiID key, float default_val)
 {
-    return &Map.try_emplace(key, Value{.val_f=default_val}).first->second.val_f;
+    return &Map().try_emplace(key, Value{.val_f=default_val}).first->second.val_f;
 }
 
 void** ImGuiStorage::GetVoidPtrRef(ImGuiID key, void* default_val)
 {
-    return &Map.try_emplace(key, Value{.val_p=default_val}).first->second.val_p;
+    return &Map().try_emplace(key, Value{.val_p=default_val}).first->second.val_p;
 }
 
 // FIXME-OPT: Need a way to reuse the result of lower_bound when doing GetInt()/SetInt() - not too bad because it only happens on explicit interaction (maximum one a frame)
 void ImGuiStorage::SetInt(ImGuiID key, int val)
 {
-    Map[key] = Value{.val_i = val};
+    Map()[key] = Value{.val_i = val};
 }
 
 void ImGuiStorage::SetBool(ImGuiID key, bool val)
@@ -2645,17 +2690,17 @@ void ImGuiStorage::SetBool(ImGuiID key, bool val)
 
 void ImGuiStorage::SetFloat(ImGuiID key, float val)
 {
-    Map[key] = Value{.val_f = val};
+    Map()[key] = Value{.val_f = val};
 }
 
 void ImGuiStorage::SetVoidPtr(ImGuiID key, void* val)
 {
-    Map[key] = Value{.val_p = val};
+    Map()[key] = Value{.val_p = val};
 }
 
 void ImGuiStorage::SetAllInt(int v)
 {
-    for (auto &entry : Map) {
+    for (auto &entry : Map()) {
         entry.second = Value{.val_i = v};
     }
 }
@@ -3862,7 +3907,7 @@ ImGuiWindow::ImGuiWindow(ImGuiContext* ctx, const char* name) : DrawListInst(NUL
     Ctx = ctx;
     Name = ImStrdup(name);
     NameBufLen = (int)strlen(name) + 1;
-    ID = IDStack.back().push(name); // IDStack == ImGuiID::ROOT
+    ID = ImGuiID::ROOT.push(name); // IDStack == ImGuiID::ROOT
     IDStack.push_back(ID);
     MoveId = GetID("#MOVE");
     ScrollTarget = ImVec2(FLT_MAX, FLT_MAX);
@@ -9746,7 +9791,7 @@ void ImGui::SetItemKeyOwner(ImGuiKey key, ImGuiInputFlags flags)
 // This is the only public API until we expose owner_id versions of the API as replacements.
 bool ImGui::IsKeyChordPressed(ImGuiKeyChord key_chord)
 {
-    return IsKeyChordPressed(key_chord, 0, ImGuiInputFlags_None);
+    return IsKeyChordPressed(key_chord, ImGuiInputFlags_None, ImGuiID::INVALID);
 }
 
 // This is equivalent to comparing KeyMods + doing a IsKeyPressed()
@@ -10630,7 +10675,7 @@ void ImGui::EndGroup()
 
     window->DC.CurrLineTextBaseOffset = ImMax(window->DC.PrevLineTextBaseOffset, group_data.BackupCurrLineTextBaseOffset);      // FIXME: Incorrect, we should grab the base offset from the *first line* of the group but it is hard to obtain now.
     ItemSize(group_bb.GetSize());
-    ItemAdd(group_bb, 0, NULL, ImGuiItemFlags_NoTabStop);
+    ItemAdd(group_bb, ImGuiID::INVALID, NULL, ImGuiItemFlags_NoTabStop);
 
     // If the current ActiveId was declared within the boundary of our group, we copy it to LastItemId so IsItemActive(), IsItemDeactivated() etc. will be functional on the entire group.
     // It would be neater if we replaced window.DC.LastItemId by e.g. 'bool LastItemIsActive', but would put a little more burden on individual widgets.
@@ -11091,7 +11136,7 @@ void ImGui::OpenPopupEx(ImGuiID id, ImGuiPopupFlags popup_flags)
     const int current_stack_size = g.BeginPopupStack.Size;
 
     if (popup_flags & ImGuiPopupFlags_NoOpenOverExistingPopup)
-        if (IsPopupOpen((ImGuiID)0, ImGuiPopupFlags_AnyPopupId))
+        if (IsPopupOpen(ImGuiID::INVALID, ImGuiPopupFlags_AnyPopupId))
             return;
 
     ImGuiPopupData popup_ref; // Tagged as new ref as Window will be set back to NULL if we write this into OpenPopupStack.
@@ -11707,7 +11752,7 @@ static bool ImGui::NavScoreItem(ImGuiNavItemData* result)
     else
     {
         // Degenerate case: two overlapping buttons with same center, break ties arbitrarily (note that LastItemId here is really the _previous_ item order, but it doesn't matter)
-        quadrant = (g.LastItemData.ID < g.NavId) ? ImGuiDir_Left : ImGuiDir_Right;
+        quadrant = (g.LastItemData.ID.hash_stack() < g.NavId.hash_stack()) ? ImGuiDir_Left : ImGuiDir_Right;
     }
 
     const ImGuiDir move_dir = g.NavMoveDir;
@@ -11937,7 +11982,7 @@ void ImGui::NavProcessItemForTabbingRequest(ImGuiID id, ImGuiItemFlags item_flag
         // Tab Backward
         if (g.NavId == id)
         {
-            if (result->ID)
+            if (result->ID.valid())
             {
                 g.NavMoveScoringItems = false;
                 NavUpdateAnyRequestFlag();
@@ -12077,7 +12122,7 @@ void ImGui::NavRestoreLayer(ImGuiNavLayer layer)
     ImGuiWindow* window = g.NavWindow;
     if (window->NavLastIds[layer] != 0)
     {
-        SetNavID(window->NavLastIds[layer], layer, 0, window->NavRectRel[layer]);
+        SetNavID(window->NavLastIds[layer], layer, ImGuiID::INVALID, window->NavRectRel[layer]);
     }
     else
     {
@@ -12109,7 +12154,7 @@ void ImGui::NavInitWindow(ImGuiWindow* window, bool force_reinit)
 
     if (window->Flags & ImGuiWindowFlags_NoNavInputs)
     {
-        g.NavId = 0;
+        g.NavId = ImGuiID::INVALID;
         SetNavFocusScope(window->NavRootFocusScopeId);
         return;
     }
@@ -12120,10 +12165,10 @@ void ImGui::NavInitWindow(ImGuiWindow* window, bool force_reinit)
     IMGUI_DEBUG_LOG_NAV("[nav] NavInitRequest: from NavInitWindow(), init_for_nav=%d, window=\"%s\", layer=%d\n", init_for_nav, window->Name, g.NavLayer);
     if (init_for_nav)
     {
-        SetNavID(0, g.NavLayer, window->NavRootFocusScopeId, ImRect());
+        SetNavID(ImGuiID::INVALID, g.NavLayer, window->NavRootFocusScopeId, ImRect());
         g.NavInitRequest = true;
         g.NavInitRequestFromMove = false;
-        g.NavInitResult.ID = 0;
+        g.NavInitResult.ID = ImGuiID::INVALID;
         NavUpdateAnyRequestFlag();
     }
     else
@@ -12216,12 +12261,12 @@ static void ImGui::NavUpdate()
                 g.NavInputSource = ImGuiInputSource_Keyboard;
 
     // Process navigation init request (select first/default focus)
-    g.NavJustMovedToId = 0;
+    g.NavJustMovedToId = ImGuiID::INVALID;
     if (g.NavInitResult.ID != 0)
         NavInitRequestApplyResult();
     g.NavInitRequest = false;
     g.NavInitRequestFromMove = false;
-    g.NavInitResult.ID = 0;
+    g.NavInitResult.ID = ImGuiID::INVALID;
 
     // Process navigation move request
     if (g.NavMoveSubmitted)
@@ -12254,7 +12299,7 @@ static void ImGui::NavUpdate()
     NavUpdateCancelRequest();
 
     // Process manual activation request
-    g.NavActivateId = g.NavActivateDownId = g.NavActivatePressedId = 0;
+    g.NavActivateId = g.NavActivateDownId = g.NavActivatePressedId = ImGuiID::INVALID;
     g.NavActivateFlags = ImGuiActivateFlags_None;
     if (g.NavId != 0 && !g.NavDisableHighlight && !g.NavWindowingTarget && g.NavWindow && !(g.NavWindow->Flags & ImGuiWindowFlags_NoNavInputs))
     {
@@ -12478,7 +12523,7 @@ void ImGui::NavUpdateCreateMoveRequest()
     {
         IMGUI_DEBUG_LOG_NAV("[nav] NavInitRequest: from move, window \"%s\", layer=%d\n", window ? window->Name : "<NULL>", g.NavLayer);
         g.NavInitRequest = g.NavInitRequestFromMove = true;
-        g.NavInitResult.ID = 0;
+        g.NavInitResult.ID = ImGuiID::INVALID;
         g.NavDisableHighlight = false;
     }
 
@@ -12505,7 +12550,7 @@ void ImGui::NavUpdateCreateMoveRequest()
             inner_rect_rel.Min.y = clamp_y ? (inner_rect_rel.Min.y + pad_y) : -FLT_MAX;
             inner_rect_rel.Max.y = clamp_y ? (inner_rect_rel.Max.y - pad_y) : +FLT_MAX;
             window->NavRectRel[g.NavLayer].ClipWithFull(inner_rect_rel);
-            g.NavId = 0;
+            g.NavId = ImGuiID::INVALID;
         }
     }
 
@@ -12567,7 +12612,7 @@ void ImGui::NavMoveRequestApplyResult()
 
     // Tabbing forward wrap
     if ((g.NavMoveFlags & ImGuiNavMoveFlags_IsTabbing) && result == NULL)
-        if ((g.NavTabbingCounter == 1 || g.NavTabbingDir == 0) && g.NavTabbingResultFirst.ID)
+        if ((g.NavTabbingCounter == 1 || g.NavTabbingDir == 0) && g.NavTabbingResultFirst.ID.valid())
             result = &g.NavTabbingResultFirst;
 
     // In a situation when there are no results but NavId != 0, re-enable the Navigation highlight (because g.NavId is not considered as a possible result)
@@ -12693,7 +12738,7 @@ static void ImGui::NavUpdateCancelRequest()
         ImGuiWindow* parent_window = child_window->ParentWindow;
         IM_ASSERT(child_window->ChildId != 0);
         FocusWindow(parent_window);
-        SetNavID(child_window->ChildId, ImGuiNavLayer_Main, 0, WindowRectAbsToRel(parent_window, child_window->Rect()));
+        SetNavID(child_window->ChildId, ImGuiNavLayer_Main, ImGuiID::INVALID, WindowRectAbsToRel(parent_window, child_window->Rect()));
         NavRestoreHighlightAfterMove();
     }
     else if (g.OpenPopupStack.Size > 0 && g.OpenPopupStack.back().Window != NULL && !(g.OpenPopupStack.back().Window->Flags & ImGuiWindowFlags_Modal))
@@ -12705,8 +12750,8 @@ static void ImGui::NavUpdateCancelRequest()
     {
         // Clear NavLastId for popups but keep it for regular child window so we can leave one and come back where we were
         if (g.NavWindow && ((g.NavWindow->Flags & ImGuiWindowFlags_Popup) || !(g.NavWindow->Flags & ImGuiWindowFlags_ChildWindow)))
-            g.NavWindow->NavLastIds[0] = 0;
-        g.NavId = 0;
+            g.NavWindow->NavLastIds[0] = ImGuiID::INVALID;
+        g.NavId = ImGuiID::INVALID;
     }
 }
 
@@ -12926,7 +12971,7 @@ static void ImGui::NavUpdateWindowing()
 
     // Start CTRL+Tab or Square+L/R window selection
     // (g.ConfigNavWindowingKeyNext/g.ConfigNavWindowingKeyPrev defaults are ImGuiMod_Ctrl|ImGuiKey_Tab and ImGuiMod_Ctrl|ImGuiMod_Shift|ImGuiKey_Tab)
-    const ImGuiID owner_id = ImHashStr("###NavUpdateWindowing");
+    const ImGuiID owner_id = ImGuiID::ROOT.push("###NavUpdateWindowing");
     const bool nav_gamepad_active = (io.ConfigFlags & ImGuiConfigFlags_NavEnableGamepad) != 0 && (io.BackendFlags & ImGuiBackendFlags_HasGamepad) != 0;
     const bool nav_keyboard_active = (io.ConfigFlags & ImGuiConfigFlags_NavEnableKeyboard) != 0;
     const bool keyboard_next_window = allow_windowing && g.ConfigNavWindowingKeyNext && Shortcut(g.ConfigNavWindowingKeyNext, ImGuiInputFlags_Repeat | ImGuiInputFlags_RouteAlways, owner_id);
@@ -13091,7 +13136,7 @@ static void ImGui::NavUpdateWindowing()
         {
             // Reinitialize navigation when entering menu bar with the Alt key (FIXME: could be a properly of the layer?)
             if (new_nav_layer == ImGuiNavLayer_Menu)
-                g.NavWindow->NavLastIds[new_nav_layer] = 0;
+                g.NavWindow->NavLastIds[new_nav_layer] = ImGuiID::INVALID;
             NavRestoreLayer(new_nav_layer);
             NavRestoreHighlightAfterMove();
         }
@@ -13158,7 +13203,7 @@ void ImGui::ClearDragDrop()
     g.DragDropActive = false;
     g.DragDropPayload.Clear();
     g.DragDropAcceptFlags = ImGuiDragDropFlags_None;
-    g.DragDropAcceptIdCurr = g.DragDropAcceptIdPrev = 0;
+    g.DragDropAcceptIdCurr = g.DragDropAcceptIdPrev = ImGuiID::INVALID;
     g.DragDropAcceptIdCurrRectSurface = FLT_MAX;
     g.DragDropAcceptFrameCount = -1;
 
@@ -13191,8 +13236,8 @@ bool ImGui::BeginDragDropSource(ImGuiDragDropFlags flags)
     ImGuiMouseButton mouse_button = ImGuiMouseButton_Left;
 
     bool source_drag_active = false;
-    ImGuiID source_id = 0;
-    ImGuiID source_parent_id = 0;
+    ImGuiID source_id = ImGuiID::INVALID;
+    ImGuiID source_parent_id = ImGuiID::INVALID;
     if ((flags & ImGuiDragDropFlags_SourceExtern) == 0)
     {
         source_id = g.LastItemData.ID;
@@ -13250,7 +13295,7 @@ bool ImGui::BeginDragDropSource(ImGuiDragDropFlags flags)
     else
     {
         window = NULL;
-        source_id = ImHashStr("#SourceExtern");
+        source_id = ImGuiID::ROOT.push("#SourceExtern");
         source_drag_active = true;
     }
 
@@ -13281,7 +13326,7 @@ bool ImGui::BeginDragDropSource(ImGuiDragDropFlags flags)
         // Target can request the Source to not display its tooltip (we use a dedicated flag to make this request explicit)
         // We unfortunately can't just modify the source flags and skip the call to BeginTooltip, as caller may be emitting contents.
         bool ret;
-        if (g.DragDropAcceptIdPrev && (g.DragDropAcceptFlags & ImGuiDragDropFlags_AcceptNoPreviewTooltip))
+        if (g.DragDropAcceptIdPrev.valid() && (g.DragDropAcceptFlags & ImGuiDragDropFlags_AcceptNoPreviewTooltip))
             ret = BeginTooltipHidden();
         else
             ret = BeginTooltip();
@@ -13817,9 +13862,9 @@ void ImGui::RemoveSettingsHandler(const char* type_name)
 ImGuiSettingsHandler* ImGui::FindSettingsHandler(const char* type_name)
 {
     ImGuiContext& g = *GImGui;
-    const ImGuiID type_hash = ImHashStr(type_name);
+    const ImGuiID type_hash = ImGuiID::ROOT.push(type_name);
     for (ImGuiSettingsHandler& handler : g.SettingsHandlers)
-        if (handler.TypeHash == type_hash)
+        if (ImGuiID::ROOT.push(handler.TypeHash) == type_hash)
             return &handler;
     return NULL;
 }
@@ -13964,7 +14009,7 @@ ImGuiWindowSettings* ImGui::CreateNewWindowSettings(const char* name)
     const size_t chunk_size = sizeof(ImGuiWindowSettings) + name_len + 1;
     ImGuiWindowSettings* settings = g.SettingsWindows.alloc_chunk(chunk_size);
     IM_PLACEMENT_NEW(settings) ImGuiWindowSettings();
-    settings->ID = ImHashStr(name, name_len);
+    settings->ID = ImGuiID::ROOT.push(name, name_len);
     memcpy(settings->GetName(), name, name_len + 1);   // Store with zero terminator
 
     return settings;
@@ -14000,7 +14045,7 @@ void ImGui::ClearWindowSettings(const char* name)
         window->Flags |= ImGuiWindowFlags_NoSavedSettings;
         InitOrLoadWindowSettings(window, NULL);
     }
-    if (ImGuiWindowSettings* settings = window ? FindWindowSettingsByWindow(window) : FindWindowSettingsByID(ImHashStr(name)))
+    if (ImGuiWindowSettings* settings = window ? FindWindowSettingsByWindow(window) : FindWindowSettingsByID(ImGuiID::ROOT.push(name)))
         settings->WantDelete = true;
 }
 
@@ -14014,7 +14059,7 @@ static void WindowSettingsHandler_ClearAll(ImGuiContext* ctx, ImGuiSettingsHandl
 
 static void* WindowSettingsHandler_ReadOpen(ImGuiContext*, ImGuiSettingsHandler*, const char* name)
 {
-    ImGuiID id = ImHashStr(name);
+    ImGuiID id = ImGuiID::ROOT.push(name);
     ImGuiWindowSettings* settings = ImGui::FindWindowSettingsByID(id);
     if (settings)
         *settings = ImGuiWindowSettings(); // Clear existing if recycling previous entry
@@ -14632,7 +14677,7 @@ void ImGui::ShowMetricsWindow(bool* p_open)
     {
         // Debug Break features
         // The Item Picker tool is super useful to visually select an item and break into the call-stack of where it was submitted.
-        SeparatorTextEx(0, "Debug breaks", NULL, CalcTextSize("(?)").x + g.Style.SeparatorTextPadding.x);
+        SeparatorTextEx(ImGuiID::INVALID, "Debug breaks", NULL, CalcTextSize("(?)").x + g.Style.SeparatorTextPadding.x);
         SameLine();
         MetricsHelpMarker("Will call the IM_DEBUG_BREAK() macro to break in debugger.\nWarning: If you don't have a debugger attached, this will probably crash.");
         if (Checkbox("Show Item Picker", &g.DebugItemPickerActive) && g.DebugItemPickerActive)
@@ -14778,7 +14823,7 @@ void ImGui::ShowMetricsWindow(bool* p_open)
             RenderViewportsThumbnails();
             TreePop();
         }
-        cfg->HighlightViewportID = 0;
+        cfg->HighlightViewportID = ImGuiID::INVALID;
 
         for (ImGuiViewportP* viewport : g.Viewports)
             DebugNodeViewport(viewport);
@@ -15123,8 +15168,8 @@ void ImGui::DebugBreakClearData()
 {
     // Those fields are scattered in their respective subsystem to stay in hot-data locations
     ImGuiContext& g = *GImGui;
-    g.DebugBreakInWindow = 0;
-    g.DebugBreakInTable = 0;
+    g.DebugBreakInWindow = ImGuiID::INVALID;
+    g.DebugBreakInTable = ImGuiID::INVALID;
     g.DebugBreakInShortcutRouting = ImGuiKey_None;
 }
 
@@ -15180,7 +15225,7 @@ bool ImGui::DebugBreakButton(const char* label, const char* description_of_locat
 // [DEBUG] Display contents of Columns
 void ImGui::DebugNodeColumns(ImGuiOldColumns* columns)
 {
-    if (!TreeNode((void*)(uintptr_t)columns->ID, "Columns Id: 0x%08X, Count: %d, Flags: 0x%04X", columns->ID, columns->Count, columns->Flags))
+    if (!TreeNode((void*)(uintptr_t)columns->ID.hash_stack(), "Columns Id: 0x%08X, Count: %d, Flags: 0x%04X", columns->ID, columns->Count, columns->Flags))
         return;
     BulletText("Width: %.1f (MinX: %.1f, MaxX: %.1f)", columns->OffMaxX - columns->OffMinX, columns->OffMinX, columns->OffMaxX);
     for (ImGuiOldColumnData& column : columns->Columns)
@@ -15428,9 +15473,9 @@ void ImGui::DebugNodeFontGlyph(ImFont*, const ImFontGlyph* glyph)
 // [DEBUG] Display contents of ImGuiStorage
 void ImGui::DebugNodeStorage(ImGuiStorage* storage, const char* label)
 {
-    if (!TreeNode(label, "%s: %d entries, %d bytes", label, storage->Map.size(), storage->Map.size() * sizeof(ImGuiStorage::MapType::node_type)))
+    if (!TreeNode(label, "%s: %d entries, %d bytes", label, storage->Map().size(), storage->Map().size() * sizeof(ImGuiStorage::MapType::node_type)))
         return;
-    for (const auto& p : storage->Map)
+    for (const auto& p : storage->Map())
         BulletText("Key 0x%08X Value { i: %d }", p.first.hash_stack(), p.second.val_i); // Important: we currently don't store a type, real value may not be integer.
     TreePop();
 }
@@ -15715,7 +15760,7 @@ void ImGui::DebugTextUnformattedWithLocateItem(const char* line_begin, const cha
     ImRect text_rect = g.LastItemData.Rect;
     for (const char* p = line_begin; p <= line_end - 10; p++)
     {
-        ImGuiID id = 0;
+        ImGuiID id = ImGuiID::INVALID;
         if (p[0] != '0' || (p[1] != 'x' && p[1] != 'X') || sscanf(p + 2, "%X", &id) != 1)
             continue;
         ImVec2 p0 = CalcTextSize(line_begin, p);
@@ -15800,7 +15845,7 @@ void ImGui::DebugLocateItemResolveWithLastItem()
         IM_DEBUG_BREAK();
 
     ImGuiLastItemData item_data = g.LastItemData;
-    g.DebugLocateId = 0;
+    g.DebugLocateId = ImGuiID::INVALID;
     ImDrawList* draw_list = GetForegroundDrawList(g.CurrentWindow);
     ImRect r = item_data.Rect;
     r.Expand(3.0f);
@@ -15820,7 +15865,7 @@ void ImGui::DebugStartItemPicker()
 void ImGui::UpdateDebugToolItemPicker()
 {
     ImGuiContext& g = *GImGui;
-    g.DebugItemPickerBreakId = 0;
+    g.DebugItemPickerBreakId = ImGuiID::INVALID;
     if (!g.DebugItemPickerActive)
         return;
 
@@ -15829,7 +15874,7 @@ void ImGui::UpdateDebugToolItemPicker()
     if (IsKeyPressed(ImGuiKey_Escape))
         g.DebugItemPickerActive = false;
     const bool change_mapping = g.IO.KeyMods == (ImGuiMod_Ctrl | ImGuiMod_Shift);
-    if (!change_mapping && IsMouseClicked(g.DebugItemPickerMouseButton) && hovered_id)
+    if (!change_mapping && IsMouseClicked(g.DebugItemPickerMouseButton) && hovered_id.valid())
     {
         g.DebugItemPickerBreakId = hovered_id;
         g.DebugItemPickerActive = false;
@@ -15840,13 +15885,13 @@ void ImGui::UpdateDebugToolItemPicker()
     SetNextWindowBgAlpha(0.70f);
     if (!BeginTooltip())
         return;
-    Text("HoveredId: 0x%08X", hovered_id);
+    Text("HoveredId: 0x%08X", hovered_id.valid());
     Text("Press ESC to abort picking.");
     const char* mouse_button_names[] = { "Left", "Right", "Middle" };
     if (change_mapping)
         Text("Remap w/ Ctrl+Shift: click anywhere to select new mouse button.");
     else
-        TextColored(GetStyleColorVec4(hovered_id ? ImGuiCol_Text : ImGuiCol_TextDisabled), "Click %s Button to break in debugger! (remap w/ Ctrl+Shift)", mouse_button_names[g.DebugItemPickerMouseButton]);
+        TextColored(GetStyleColorVec4(hovered_id.valid() ? ImGuiCol_Text : ImGuiCol_TextDisabled), "Click %s Button to break in debugger! (remap w/ Ctrl+Shift)", mouse_button_names[g.DebugItemPickerMouseButton]);
     EndTooltip();
 }
 
@@ -15857,13 +15902,13 @@ void ImGui::UpdateDebugToolStackQueries()
     ImGuiIDStackTool* tool = &g.DebugIDStackTool;
 
     // Clear hook when id stack tool is not visible
-    g.DebugHookIdInfo = 0;
+    g.DebugHookIdInfo = ImGuiID::INVALID;
     if (g.FrameCount != tool->LastActiveFrame + 1)
         return;
 
     // Update queries. The steps are: -1: query Stack, >= 0: query each stack item
     // We can only perform 1 ID Info query every frame. This is designed so the GetID() tests are cheap and constant-time
-    const ImGuiID query_id = g.HoveredIdPreviousFrame ? g.HoveredIdPreviousFrame : g.ActiveId;
+    const ImGuiID query_id = g.HoveredIdPreviousFrame.valid() ? g.HoveredIdPreviousFrame : g.ActiveId;
     if (tool->QueryId != query_id)
     {
         tool->QueryId = query_id;

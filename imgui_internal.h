@@ -686,7 +686,7 @@ struct ImPool
     ImPoolIdx   GetIndex(const T* p) const          { IM_ASSERT(p >= Buf.Data && p < Buf.Data + Buf.Size); return (ImPoolIdx)(p - Buf.Data); }
     T*          GetOrAddByKey(ImGuiID key)          { int* p_idx = Map.GetIntRef(key, -1); if (*p_idx != -1) return &Buf[*p_idx]; *p_idx = FreeIdx; return Add(); }
     bool        Contains(const T* p) const          { return (p >= Buf.Data && p < Buf.Data + Buf.Size); }
-    void        Clear()                             { for (auto &entry : Map.Map) { int idx = entry.second.val_i; if (idx != -1) Buf[idx].~T(); } Map.Clear(); Buf.clear(); FreeIdx = AliveCount = 0; }
+    void        Clear()                             { for (auto &entry : Map.Map()) { int idx = entry.second.val_i; if (idx != -1) Buf[idx].~T(); } Map.Clear(); Buf.clear(); FreeIdx = AliveCount = 0; }
     T*          Add()                               { int idx = FreeIdx; if (idx == Buf.Size) { Buf.resize(Buf.Size + 1); FreeIdx++; } else { FreeIdx = *(int*)&Buf[idx]; } IM_PLACEMENT_NEW(&Buf[idx]) T(); AliveCount++; return &Buf[idx]; }
     void        Remove(ImGuiID key, const T* p)     { Remove(key, GetIndex(p)); }
     void        Remove(ImGuiID key, ImPoolIdx idx)  { Buf[idx].~T(); *(int*)&Buf[idx] = FreeIdx; FreeIdx = idx; Map.SetInt(key, -1); AliveCount--; }
@@ -696,10 +696,10 @@ struct ImPool
     // Can be avoided if you know .Remove() has never been called on the pool, or AliveCount == GetMapSize()
     int         GetAliveCount() const               { return AliveCount; }      // Number of active/alive items in the pool (for display purpose)
     int         GetBufSize() const                  { return Buf.Size; }
-    int         GetMapSize() const                  { return Map.Map.size(); }   // It is the map we need iterate to find valid items, since we don't have "alive" storage anywhere
+    int         GetMapSize() const                  { return Map.Map().size(); }   // It is the map we need iterate to find valid items, since we don't have "alive" storage anywhere
 
     auto DataView() {
-        return Map.Map | std::views::transform([](auto &pair) { return pair.second.val_i; })
+        return Map.Map() | std::views::transform([](auto &pair) { return pair.second.val_i; })
                        | std::views::filter([](int idx) { return idx != -1; })
                        | std::views::transform([this](int idx) { return GetByIndex(idx); });
     }
