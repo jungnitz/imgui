@@ -54,6 +54,7 @@ Index of this file:
 #include <stdlib.h>     // NULL, malloc, free, qsort, atoi, atof
 #include <math.h>       // sqrtf, fabsf, fmodf, powf, floorf, ceilf, cosf, sinf
 #include <limits.h>     // INT_MIN, INT_MAX
+#include <ranges>
 
 // Enable SSE intrinsics if available
 #if (defined __SSE__ || defined __x86_64__ || defined _M_X64 || (defined(_M_IX86_FP) && (_M_IX86_FP >= 1))) && !defined(IMGUI_DISABLE_SSE)
@@ -351,8 +352,8 @@ namespace ImStb
 //-----------------------------------------------------------------------------
 
 // Helpers: Hashing
-IMGUI_API ImGuiID       ImHashData(const void* data, size_t data_size, ImGuiID seed = 0);
-IMGUI_API ImGuiID       ImHashStr(const char* data, size_t data_size = 0, ImGuiID seed = 0);
+IMGUI_API ImGuiIDNum  ImHashData(const void* data, size_t data_size, ImGuiIDNum seed = 0);
+IMGUI_API ImGuiIDNum  ImHashStr(const char* data, size_t data_size = 0, ImGuiIDNum seed = 0);
 
 // Helpers: Sorting
 #ifndef ImQsort
@@ -685,18 +686,23 @@ struct ImPool
     ImPoolIdx   GetIndex(const T* p) const          { IM_ASSERT(p >= Buf.Data && p < Buf.Data + Buf.Size); return (ImPoolIdx)(p - Buf.Data); }
     T*          GetOrAddByKey(ImGuiID key)          { int* p_idx = Map.GetIntRef(key, -1); if (*p_idx != -1) return &Buf[*p_idx]; *p_idx = FreeIdx; return Add(); }
     bool        Contains(const T* p) const          { return (p >= Buf.Data && p < Buf.Data + Buf.Size); }
-    void        Clear()                             { for (int n = 0; n < Map.Data.Size; n++) { int idx = Map.Data[n].val_i; if (idx != -1) Buf[idx].~T(); } Map.Clear(); Buf.clear(); FreeIdx = AliveCount = 0; }
+    void        Clear()                             { for (auto &entry : Map.Map) { int idx = entry.second.val_i; if (idx != -1) Buf[idx].~T(); } Map.Clear(); Buf.clear(); FreeIdx = AliveCount = 0; }
     T*          Add()                               { int idx = FreeIdx; if (idx == Buf.Size) { Buf.resize(Buf.Size + 1); FreeIdx++; } else { FreeIdx = *(int*)&Buf[idx]; } IM_PLACEMENT_NEW(&Buf[idx]) T(); AliveCount++; return &Buf[idx]; }
     void        Remove(ImGuiID key, const T* p)     { Remove(key, GetIndex(p)); }
     void        Remove(ImGuiID key, ImPoolIdx idx)  { Buf[idx].~T(); *(int*)&Buf[idx] = FreeIdx; FreeIdx = idx; Map.SetInt(key, -1); AliveCount--; }
-    void        Reserve(int capacity)               { Buf.reserve(capacity); Map.Data.reserve(capacity); }
+    void        Reserve(int capacity)               { Buf.reserve(capacity); }
 
     // To iterate a ImPool: for (int n = 0; n < pool.GetMapSize(); n++) if (T* t = pool.TryGetMapData(n)) { ... }
     // Can be avoided if you know .Remove() has never been called on the pool, or AliveCount == GetMapSize()
     int         GetAliveCount() const               { return AliveCount; }      // Number of active/alive items in the pool (for display purpose)
     int         GetBufSize() const                  { return Buf.Size; }
-    int         GetMapSize() const                  { return Map.Data.Size; }   // It is the map we need iterate to find valid items, since we don't have "alive" storage anywhere
-    T*          TryGetMapData(ImPoolIdx n)          { int idx = Map.Data[n].val_i; if (idx == -1) return NULL; return GetByIndex(idx); }
+    int         GetMapSize() const                  { return Map.Map.size(); }   // It is the map we need iterate to find valid items, since we don't have "alive" storage anywhere
+
+    auto DataView() {
+        return Map.Map | std::views::transform([](auto &pair) { return pair.second.val_i; })
+                       | std::views::filter([](int idx) { return idx != -1; })
+                       | std::views::transform([this](int idx) { return GetByIndex(idx); });
+    }
 };
 
 // Helper: ImChunkStream<>
@@ -1065,7 +1071,7 @@ struct IMGUI_API ImGuiInputTextDeactivatedState
     ImVector<char>     TextA;           // text buffer
 
     ImGuiInputTextDeactivatedState()    { memset(this, 0, sizeof(*this)); }
-    void    ClearFreeMemory()           { ID = 0; TextA.clear(); }
+    void    ClearFreeMemory()           { ID = ImGuiID::INVALID; TextA.clear(); }
 };
 // Internal state of the currently focused/edited text input box
 // For a given item ID, access with ImGui::GetInputTextState()
@@ -1402,8 +1408,8 @@ struct ImGuiInputEvent
 };
 
 // Input function taking an 'ImGuiID owner_id' argument defaults to (ImGuiKeyOwner_Any == 0) aka don't test ownership, which matches legacy behavior.
-#define ImGuiKeyOwner_Any           ((ImGuiID)0)    // Accept key that have an owner, UNLESS a call to SetKeyOwner() explicitly used ImGuiInputFlags_LockThisFrame or ImGuiInputFlags_LockUntilRelease.
-#define ImGuiKeyOwner_NoOwner       ((ImGuiID)-1)   // Require key to have no owner.
+#define ImGuiKeyOwner_Any           (ImGuiID::specialValue(0))    // Accept key that have an owner, UNLESS a call to SetKeyOwner() explicitly used ImGuiInputFlags_LockThisFrame or ImGuiInputFlags_LockUntilRelease.
+#define ImGuiKeyOwner_NoOwner       (ImGuiID::specialValue(-1))   // Require key to have no owner.
 //#define ImGuiKeyOwner_None ImGuiKeyOwner_NoOwner  // We previously called this 'ImGuiKeyOwner_None' but it was inconsistent with our pattern that _None values == 0 and quite dangerous. Also using _NoOwner makes the IsKeyPressed() calls more explicit.
 
 typedef ImS16 ImGuiKeyRoutingIndex;
@@ -1597,7 +1603,7 @@ struct ImGuiNavItemData
     ImGuiSelectionUserData SelectionUserData;//I+Mov    // Best candidate SetNextItemSelectionData() value.
 
     ImGuiNavItemData()  { Clear(); }
-    void Clear()        { Window = NULL; ID = FocusScopeId = 0; InFlags = 0; SelectionUserData = -1; DistBox = DistCenter = DistAxial = FLT_MAX; }
+    void Clear()        { Window = NULL; ID = FocusScopeId = ImGuiID::INVALID; InFlags = 0; SelectionUserData = -1; DistBox = DistCenter = DistAxial = FLT_MAX; }
 };
 
 // Storage for PushFocusScope()
@@ -1774,7 +1780,7 @@ struct ImGuiWindowSettings
 struct ImGuiSettingsHandler
 {
     const char* TypeName;       // Short description stored in .ini file. Disallowed characters: '[' ']'
-    ImGuiID     TypeHash;       // == ImHashStr(TypeName)
+    ImGuiIDNum TypeHash;       // == ImHashStr(TypeName)
     void        (*ClearAllFn)(ImGuiContext* ctx, ImGuiSettingsHandler* handler);                                // Clear all settings data
     void        (*ReadInitFn)(ImGuiContext* ctx, ImGuiSettingsHandler* handler);                                // Read: Called before reading (in registration order)
     void*       (*ReadOpenFn)(ImGuiContext* ctx, ImGuiSettingsHandler* handler, const char* name);              // Read: Called when entering into a new ini entry e.g. "[Window][Name]"
@@ -1864,7 +1870,7 @@ struct ImGuiMetricsConfig
     int         ShowWindowsRectsType = -1;
     int         ShowTablesRectsType = -1;
     int         HighlightMonitorIdx = -1;
-    ImGuiID     HighlightViewportID = 0;
+    ImGuiID     HighlightViewportID = ImGuiID::INVALID;
 };
 
 struct ImGuiStackLevelInfo
@@ -1900,9 +1906,9 @@ enum ImGuiContextHookType { ImGuiContextHookType_NewFramePre, ImGuiContextHookTy
 
 struct ImGuiContextHook
 {
-    ImGuiID                     HookId;     // A unique ID assigned by AddContextHook()
+    ImGuiIDNum                HookId;     // A unique ID assigned by AddContextHook()
     ImGuiContextHookType        Type;
-    ImGuiID                     Owner;
+    ImGuiIDNum                Owner;
     ImGuiContextHookCallback    Callback;
     void*                       UserData;
 
@@ -2194,7 +2200,7 @@ struct ImGuiContext
     ImChunkStream<ImGuiWindowSettings>  SettingsWindows;        // ImGuiWindow .ini settings entries
     ImChunkStream<ImGuiTableSettings>   SettingsTables;         // ImGuiTable .ini settings entries
     ImVector<ImGuiContextHook>          Hooks;                  // Hooks for extensions (e.g. test engine)
-    ImGuiID                             HookIdNext;             // Next available HookId
+    ImGuiIDNum                        HookIdNext;             // Next available HookId
 
     // Localization
     const char*             LocalizationTable[ImGuiLocKey_COUNT];
@@ -2273,14 +2279,14 @@ struct ImGuiContext
         WheelingWindowStartFrame = WheelingWindowScrolledFrame = -1;
         WheelingWindowReleaseTimer = 0.0f;
 
-        DebugHookIdInfo = 0;
-        HoveredId = HoveredIdPreviousFrame = 0;
+        DebugHookIdInfo = ImGuiID::INVALID;
+        HoveredId = HoveredIdPreviousFrame = ImGuiID::INVALID;
         HoveredIdAllowOverlap = false;
         HoveredIdDisabled = false;
         HoveredIdTimer = HoveredIdNotActiveTimer = 0.0f;
         ItemUnclipByLog = false;
-        ActiveId = 0;
-        ActiveIdIsAlive = 0;
+        ActiveId = ImGuiID::INVALID;
+        ActiveIdIsAlive = ImGuiID::INVALID;
         ActiveIdTimer = 0.0f;
         ActiveIdIsJustActivated = false;
         ActiveIdAllowOverlap = false;
@@ -2293,11 +2299,11 @@ struct ImGuiContext
         ActiveIdWindow = NULL;
         ActiveIdSource = ImGuiInputSource_None;
         ActiveIdMouseButton = -1;
-        ActiveIdPreviousFrame = 0;
+        ActiveIdPreviousFrame = ImGuiID::INVALID;
         ActiveIdPreviousFrameIsAlive = false;
         ActiveIdPreviousFrameHasBeenEditedBefore = false;
         ActiveIdPreviousFrameWindow = NULL;
-        LastActiveId = 0;
+        LastActiveId = ImGuiID::INVALID;
         LastActiveIdTimer = 0.0f;
 
         LastKeyboardKeyPressTime = LastKeyModsChangeTime = LastKeyModsChangeFromNoneTime = -1.0;
@@ -2308,15 +2314,15 @@ struct ImGuiContext
         ActiveIdUsingNavInputMask = 0x00;
 #endif
 
-        CurrentFocusScopeId = 0;
+        CurrentFocusScopeId = ImGuiID::INVALID;
         CurrentItemFlags = ImGuiItemFlags_None;
         DebugShowGroupRects = false;
 
         NavWindow = NULL;
-        NavId = NavFocusScopeId = NavActivateId = NavActivateDownId = NavActivatePressedId = 0;
-        NavJustMovedToId = NavJustMovedToFocusScopeId = NavNextActivateId = 0;
+        NavId = NavFocusScopeId = NavActivateId = NavActivateDownId = NavActivatePressedId = ImGuiID::INVALID;
+        NavJustMovedToId = NavJustMovedToFocusScopeId = NavNextActivateId = ImGuiID::INVALID;
         NavActivateFlags = NavNextActivateFlags = ImGuiActivateFlags_None;
-        NavHighlightActivatedId = 0;
+        NavHighlightActivatedId = ImGuiID::INVALID;
         NavHighlightActivatedTimer = 0.0f;
         NavJustMovedToKeyMods = ImGuiMod_None;
         NavInputSource = ImGuiInputSource_Keyboard;
@@ -2355,12 +2361,12 @@ struct ImGuiContext
         DragDropSourceFlags = ImGuiDragDropFlags_None;
         DragDropSourceFrameCount = -1;
         DragDropMouseButton = -1;
-        DragDropTargetId = 0;
+        DragDropTargetId = ImGuiID::INVALID;
         DragDropAcceptFlags = ImGuiDragDropFlags_None;
         DragDropAcceptIdCurrRectSurface = 0.0f;
-        DragDropAcceptIdPrev = DragDropAcceptIdCurr = 0;
+        DragDropAcceptIdPrev = DragDropAcceptIdCurr = ImGuiID::INVALID;
         DragDropAcceptFrameCount = -1;
-        DragDropHoldJustPressedId = 0;
+        DragDropHoldJustPressedId = ImGuiID::INVALID;
         memset(DragDropPayloadBufLocal, 0, sizeof(DragDropPayloadBufLocal));
 
         ClipperTempDataStacked = 0;
@@ -2369,16 +2375,16 @@ struct ImGuiContext
         TablesTempDataStacked = 0;
         CurrentTabBar = NULL;
 
-        HoverItemDelayId = HoverItemDelayIdPreviousFrame = HoverItemUnlockedStationaryId = HoverWindowUnlockedStationaryId = 0;
+        HoverItemDelayId = HoverItemDelayIdPreviousFrame = HoverItemUnlockedStationaryId = HoverWindowUnlockedStationaryId = ImGuiID::INVALID;
         HoverItemDelayTimer = HoverItemDelayClearTimer = 0.0f;
 
         MouseCursor = ImGuiMouseCursor_Arrow;
         MouseStationaryTimer = 0.0f;
 
-        TempInputId = 0;
+        TempInputId = ImGuiID::INVALID;
         BeginMenuDepth = BeginComboDepth = 0;
         ColorEditOptions = ImGuiColorEditFlags_DefaultOptions_;
-        ColorEditCurrentID = ColorEditSavedID = 0;
+        ColorEditCurrentID = ColorEditSavedID = ImGuiID::INVALID;
         ColorEditSavedHue = ColorEditSavedSat = 0.0f;
         ColorEditSavedColor = 0;
         WindowResizeRelativeMode = false;
@@ -2414,20 +2420,20 @@ struct ImGuiContext
         LogDepthToExpand = LogDepthToExpandDefault = 2;
 
         DebugLogFlags = ImGuiDebugLogFlags_OutputToTTY;
-        DebugLocateId = 0;
+        DebugLocateId = ImGuiID::INVALID;
         DebugLogAutoDisableFlags = ImGuiDebugLogFlags_None;
         DebugLogAutoDisableFrames = 0;
         DebugLocateFrames = 0;
         DebugBeginReturnValueCullDepth = -1;
         DebugItemPickerActive = false;
         DebugItemPickerMouseButton = ImGuiMouseButton_Left;
-        DebugItemPickerBreakId = 0;
+        DebugItemPickerBreakId = ImGuiID::INVALID;
         DebugFlashStyleColorTime = 0.0f;
         DebugFlashStyleColorIdx = ImGuiCol_COUNT;
 
         // Same as DebugBreakClearData(). Those fields are scattered in their respective subsystem to stay in hot-data locations
-        DebugBreakInWindow = 0;
-        DebugBreakInTable = 0;
+        DebugBreakInWindow = ImGuiID::INVALID;
+        DebugBreakInTable = ImGuiID::INVALID;
         DebugBreakInLocateId = false;
         DebugBreakKeyChord = ImGuiKey_Pause;
         DebugBreakInShortcutRouting = ImGuiKey_None;
@@ -2725,7 +2731,7 @@ struct ImGuiTableColumn
     float                   StretchWeight;                  // Master width weight when (Flags & _WidthStretch). Often around ~1.0f initially.
     float                   InitStretchWeightOrWidth;       // Value passed to TableSetupColumn(). For Width it is a content width (_without padding_).
     ImRect                  ClipRect;                       // Clipping rectangle for the column
-    ImGuiID                 UserID;                         // Optional, value passed to TableSetupColumn()
+    ImGuiIDNum            UserID;                         // Optional, value passed to TableSetupColumn()
     float                   WorkMinX;                       // Contents region min ~(MinX + CellPaddingX + CellSpacingX1) == cursor start position when entering column
     float                   WorkMaxX;                       // Contents region max ~(MaxX - CellPaddingX - CellSpacingX2)
     float                   ItemWidth;                      // Current item width for the column, preserved across rows
@@ -2801,7 +2807,7 @@ struct ImGuiTableInstanceData
     int                         HoveredRowLast;             // Index of row which was hovered last frame.
     int                         HoveredRowNext;             // Index of row hovered this frame, set after encountering it.
 
-    ImGuiTableInstanceData()    { TableInstanceID = 0; LastOuterHeight = LastTopHeadersRowHeight = LastFrozenHeight = 0.0f; HoveredRowLast = HoveredRowNext = -1; }
+    ImGuiTableInstanceData()    { TableInstanceID = ImGuiID::INVALID; LastOuterHeight = LastTopHeadersRowHeight = LastFrozenHeight = 0.0f; HoveredRowLast = HoveredRowNext = -1; }
 };
 
 // sizeof() ~ 592 bytes + heap allocs described in TableBeginInitMemory()
@@ -2966,7 +2972,7 @@ struct ImGuiTableColumnSettings
     ImGuiTableColumnSettings()
     {
         WidthOrWeight = 0.0f;
-        UserID = 0;
+        UserID = ImGuiID::INVALID;
         Index = -1;
         DisplayOrder = SortOrder = -1;
         SortDirection = ImGuiSortDirection_None;
@@ -3056,8 +3062,8 @@ namespace ImGui
     IMGUI_API void          UpdateMouseMovingWindowEndFrame();
 
     // Generic context hooks
-    IMGUI_API ImGuiID       AddContextHook(ImGuiContext* context, const ImGuiContextHook* hook);
-    IMGUI_API void          RemoveContextHook(ImGuiContext* context, ImGuiID hook_to_remove);
+    IMGUI_API ImGuiIDNum  AddContextHook(ImGuiContext* context, const ImGuiContextHook* hook);
+    IMGUI_API void          RemoveContextHook(ImGuiContext* context, ImGuiIDNum hook_to_remove);
     IMGUI_API void          CallContextHooks(ImGuiContext* context, ImGuiContextHookType type);
 
     // Viewports
@@ -3249,11 +3255,11 @@ namespace ImGui
     //   Legacy functions use ImGuiKeyOwner_Any meaning that they typically ignore ownership, unless a call to SetKeyOwner() explicitly used ImGuiInputFlags_LockThisFrame or ImGuiInputFlags_LockUntilRelease.
     // - Binding generators may want to ignore those for now, or suffix them with Ex() until we decide if this gets moved into public API.
     IMGUI_API bool          IsKeyDown(ImGuiKey key, ImGuiID owner_id);
-    IMGUI_API bool          IsKeyPressed(ImGuiKey key, ImGuiInputFlags flags, ImGuiID owner_id = 0);    // Important: when transitioning from old to new IsKeyPressed(): old API has "bool repeat = true", so would default to repeat. New API requiress explicit ImGuiInputFlags_Repeat.
+    IMGUI_API bool          IsKeyPressed(ImGuiKey key, ImGuiInputFlags flags, ImGuiID owner_id = ImGuiID::INVALID);    // Important: when transitioning from old to new IsKeyPressed(): old API has "bool repeat = true", so would default to repeat. New API requiress explicit ImGuiInputFlags_Repeat.
     IMGUI_API bool          IsKeyReleased(ImGuiKey key, ImGuiID owner_id);
-    IMGUI_API bool          IsKeyChordPressed(ImGuiKeyChord key_chord, ImGuiInputFlags flags, ImGuiID owner_id = 0);
+    IMGUI_API bool          IsKeyChordPressed(ImGuiKeyChord key_chord, ImGuiInputFlags flags, ImGuiID owner_id = ImGuiID::INVALID);
     IMGUI_API bool          IsMouseDown(ImGuiMouseButton button, ImGuiID owner_id);
-    IMGUI_API bool          IsMouseClicked(ImGuiMouseButton button, ImGuiInputFlags flags, ImGuiID owner_id = 0);
+    IMGUI_API bool          IsMouseClicked(ImGuiMouseButton button, ImGuiInputFlags flags, ImGuiID owner_id = ImGuiID::INVALID);
     IMGUI_API bool          IsMouseReleased(ImGuiMouseButton button, ImGuiID owner_id);
     IMGUI_API bool          IsMouseDoubleClicked(ImGuiMouseButton button, ImGuiID owner_id);
 

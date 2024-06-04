@@ -144,7 +144,7 @@ Index of this file:
 //-----------------------------------------------------------------------------
 
 // Scalar data types
-typedef unsigned int        ImGuiID;// A unique ID used by widgets (typically the result of hashing a stack of string)
+typedef unsigned int        ImGuiIDNum;// Entry of the ID stack
 typedef signed char         ImS8;   // 8-bit signed integer
 typedef unsigned char       ImU8;   // 8-bit unsigned integer
 typedef signed short        ImS16;  // 16-bit signed integer
@@ -155,6 +155,7 @@ typedef signed   long long  ImS64;  // 64-bit signed integer
 typedef unsigned long long  ImU64;  // 64-bit unsigned integer
 
 // Forward declarations
+struct ImGuiID;
 struct ImDrawChannel;               // Temporary storage to output draw commands out of order, used by ImDrawListSplitter and ImDrawList::ChannelsSplit()
 struct ImDrawCmd;                   // A single draw command within a parent ImDrawList (generally maps to 1 GPU draw call, unless it is a callback)
 struct ImDrawData;                  // All draw command lists required to render the frame + pos/size coordinates to use for the projection matrix.
@@ -293,6 +294,84 @@ struct ImVec4
 #endif
 };
 IM_MSVC_RUNTIME_CHECKS_RESTORE
+
+#include <vector>
+#include <memory>
+
+struct ImZero {
+    constexpr ImZero(int value) {
+        assert(value == 0);
+    }
+};
+
+struct ImGuiID {
+    using IdStack = std::vector<ImGuiIDNum>;
+
+    static ImGuiID INVALID;
+    static ImGuiID ROOT;
+
+    // Constructs an invalid ImGuiID
+    ImGuiID();
+
+    static ImGuiID specialValue(ImGuiIDNum hash) {
+        if (hash == 0) return ImGuiID::INVALID;
+        return ImGuiID::INVALID.push(hash);
+    }
+
+    // Invalid has the following requirements for compatibility reasons:
+    // ImGuiID::INVALID.invalid() == true
+    // ImGuiID::specialValue(0) == true
+    // ImGuiID::specialValue(!= 0) == false
+    // then comparison with zero via == ImZero behaves as with the standard ID system
+    bool invalid() const;
+
+    // !invalid()
+    bool valid() const { return !invalid(); }
+
+    // Returns ID of parent
+    ImGuiID pop() const;
+
+    ImGuiID push(ImGuiIDNum id) const;
+    ImGuiID push(const void* ptr) const;
+    ImGuiID push(const char* string) const;
+    ImGuiID push(const char* string_begin, const char* string_end) const;
+    ImGuiID push(const void* data, size_t data_size) const;
+
+    // Hash of the complete ID stack until this ID
+    ImGuiIDNum hash_stack() const { return node_->hash; }
+
+    friend bool operator==(ImGuiID const& id1, ImGuiID const& id2);
+
+    friend bool operator==(ImGuiID const& id, ImZero /*zero*/) {
+        return id.invalid();
+    }
+
+    friend bool operator!=(ImGuiID const& id, ImZero /*zero*/) {
+        return id.valid();
+    }
+
+
+private:
+    struct Node {
+        ImGuiIDNum id = 0;
+        ImGuiIDNum hash = 0;
+        std::shared_ptr<Node> parent = nullptr;
+    };
+
+    ImGuiID(const Node& node);
+
+    ImGuiID(std::shared_ptr<Node> node);
+
+    std::shared_ptr<Node> node_ = nullptr;
+
+};
+
+struct ImGuiIDHasher {
+public:
+  size_t operator()(ImGuiID const& id) const {
+    return id.hash_stack();
+  }
+};
 
 //-----------------------------------------------------------------------------
 // [SECTION] Dear ImGui end-user API functions
@@ -792,7 +871,7 @@ namespace ImGui
     // - You may manually submit headers using TableNextRow() + TableHeader() calls, but this is only useful in
     //   some advanced use cases (e.g. adding custom widgets in header row).
     // - Use TableSetupScrollFreeze() to lock columns/rows so they stay visible when scrolled.
-    IMGUI_API void          TableSetupColumn(const char* label, ImGuiTableColumnFlags flags = 0, float init_width_or_weight = 0.0f, ImGuiID user_id = 0);
+    IMGUI_API void          TableSetupColumn(const char* label, ImGuiTableColumnFlags flags = 0, float init_width_or_weight = 0.0f, ImGuiIDNum user_id = 0);
     IMGUI_API void          TableSetupScrollFreeze(int cols, int rows);         // lock columns/rows so they stay visible when scrolled.
     IMGUI_API void          TableHeader(const char* label);                     // submit one header cell manually (rarely used)
     IMGUI_API void          TableHeadersRow();                                  // submit a row with headers cells based on data provided to TableSetupColumn() + submit context menu
@@ -1921,7 +2000,7 @@ struct ImGuiTableSortSpecs
 // Sorting specification for one column of a table (sizeof == 12 bytes)
 struct ImGuiTableColumnSortSpecs
 {
-    ImGuiID                     ColumnUserID;       // User id of the column (if specified by a TableSetupColumn() call)
+    ImGuiIDNum                ColumnUserID;       // User id of the column (if specified by a TableSetupColumn() call)
     ImS16                       ColumnIndex;        // Index of the column
     ImS16                       SortOrder;          // Index within parent ImGuiTableSortSpecs (always stored in order starting from 0, tables sorted on a single criteria will always have a 0 here)
     ImGuiSortDirection          SortDirection;      // ImGuiSortDirection_Ascending or ImGuiSortDirection_Descending
@@ -2379,7 +2458,7 @@ struct ImGuiPayload
     bool            Delivery;           // Set when AcceptDragDropPayload() was called and mouse button is released over the target item.
 
     ImGuiPayload()  { Clear(); }
-    void Clear()    { SourceId = SourceParentId = 0; Data = NULL; DataSize = 0; memset(DataType, 0, sizeof(DataType)); DataFrameCount = -1; Preview = Delivery = false; }
+    void Clear()    { SourceId = SourceParentId = ImGuiID(); Data = NULL; DataSize = 0; memset(DataType, 0, sizeof(DataType)); DataFrameCount = -1; Preview = Delivery = false; }
     bool IsDataType(const char* type) const { return DataFrameCount != -1 && strcmp(type, DataType) == 0; }
     bool IsPreview() const                  { return Preview; }
     bool IsDelivery() const                 { return Delivery; }
@@ -2461,24 +2540,19 @@ struct ImGuiTextBuffer
 // - You want to manipulate the open/close state of a particular sub-tree in your interface (tree node uses Int 0/1 to store their state).
 // - You want to store custom debug data easily without adding or editing structures in your code (probably not efficient, but convenient)
 // Types are NOT stored, so it is up to you to make sure your Key don't collide with different types.
+
+#include <unordered_map>
+
 struct ImGuiStorage
 {
-    // [Internal]
-    struct ImGuiStoragePair
-    {
-        ImGuiID key;
-        union { int val_i; float val_f; void* val_p; };
-        ImGuiStoragePair(ImGuiID _key, int _val)    { key = _key; val_i = _val; }
-        ImGuiStoragePair(ImGuiID _key, float _val)  { key = _key; val_f = _val; }
-        ImGuiStoragePair(ImGuiID _key, void* _val)  { key = _key; val_p = _val; }
-    };
-
-    ImVector<ImGuiStoragePair>      Data;
+    union Value { int val_i; float val_f; void* val_p; };
+    std::unordered_map<ImGuiID, Value, ImGuiIDHasher> Map;
+    using MapType = std::unordered_map<ImGuiID, Value, ImGuiIDHasher>;
 
     // - Get***() functions find pair, never add/allocate. Pairs are sorted so a query is O(log N)
     // - Set***() functions find pair, insertion on demand if missing.
     // - Sorted insertion is costly, paid once. A typical frame shouldn't need to insert any new pair.
-    void                Clear() { Data.clear(); }
+    void                Clear() { Map.clear(); }
     IMGUI_API int       GetInt(ImGuiID key, int default_val = 0) const;
     IMGUI_API void      SetInt(ImGuiID key, int val);
     IMGUI_API bool      GetBool(ImGuiID key, bool default_val = false) const;

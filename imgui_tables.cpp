@@ -331,7 +331,7 @@ bool    ImGui::BeginTableEx(const char* name, ImGuiID id, int columns_count, ImG
     const ImVec2 actual_outer_size = CalcItemSize(outer_size, ImMax(avail_size.x, 1.0f), use_child_window ? ImMax(avail_size.y, 1.0f) : 0.0f);
     const ImRect outer_rect(outer_window->DC.CursorPos, outer_window->DC.CursorPos + actual_outer_size);
     const bool outer_window_is_measuring_size = (outer_window->AutoFitFramesX > 0) || (outer_window->AutoFitFramesY > 0); // Doesn't apply to AlwaysAutoResize windows!
-    if (use_child_window && IsClippedEx(outer_rect, 0) && !outer_window_is_measuring_size)
+    if (use_child_window && IsClippedEx(outer_rect, ImGuiID::INVALID) && !outer_window_is_measuring_size)
     {
         ItemSize(outer_rect);
         ItemAdd(outer_rect, id);
@@ -1009,8 +1009,8 @@ void ImGui::TableUpdateLayout(ImGuiTable* table)
     table->HoveredColumnBody = table->HoveredColumnBorder = -1;
     const ImRect mouse_hit_rect(table->OuterRect.Min.x, table->OuterRect.Min.y, table->OuterRect.Max.x, ImMax(table->OuterRect.Max.y, table->OuterRect.Min.y + table_instance->LastOuterHeight));
     const ImGuiID backup_active_id = g.ActiveId;
-    g.ActiveId = 0;
-    const bool is_hovering_table = ItemHoverable(mouse_hit_rect, 0, ImGuiItemFlags_None);
+    g.ActiveId = ImGuiID::INVALID;
+    const bool is_hovering_table = ItemHoverable(mouse_hit_rect, ImGuiID::INVALID, ImGuiItemFlags_None);
     g.ActiveId = backup_active_id;
 
     // Determine skewed MousePos.x to support angled headers.
@@ -1478,7 +1478,7 @@ void    ImGui::EndTable()
     else
     {
         ItemSize(table->OuterRect.GetSize());
-        ItemAdd(table->OuterRect, 0);
+        ItemAdd(table->OuterRect, ImGuiID::INVALID);
     }
 
     // Override declared contents width/height to enable auto-resize while not needlessly adding a scrollbar
@@ -1536,7 +1536,7 @@ void    ImGui::EndTable()
 
 // See "COLUMNS SIZING POLICIES" comments at the top of this file
 // If (init_width_or_weight <= 0.0f) it is ignored
-void ImGui::TableSetupColumn(const char* label, ImGuiTableColumnFlags flags, float init_width_or_weight, ImGuiID user_id)
+void ImGui::TableSetupColumn(const char* label, ImGuiTableColumnFlags flags, float init_width_or_weight, ImGuiIDNum user_id)
 {
     ImGuiContext& g = *GImGui;
     ImGuiTable* table = g.CurrentTable;
@@ -1741,7 +1741,7 @@ ImGuiID ImGui::TableGetColumnResizeID(ImGuiTable* table, int column_n, int insta
 {
     IM_ASSERT(column_n >= 0 && column_n < table->ColumnsCount);
     ImGuiID instance_id = TableGetInstanceID(table, instance_no);
-    return instance_id + 1 + column_n; // FIXME: #6140: still not ideal
+    return instance_id.push(column_n);
 }
 
 // Return -1 when table is not hovered. return columns_count if hovering the unused space at the right of the right-most visible column.
@@ -2129,7 +2129,7 @@ void ImGui::TableBeginCell(ImGuiTable* table, int column_n)
     window->SkipItems = column->IsSkipItems;
     if (column->IsSkipItems)
     {
-        g.LastItemData.ID = 0;
+        g.LastItemData.ID = ImGuiID::INVALID;
         g.LastItemData.StatusFlags = 0;
     }
 
@@ -3380,7 +3380,7 @@ void ImGui::TableOpenContextMenu(int column_n)
         table->IsContextPopupOpen = true;
         table->ContextPopupColumn = (ImGuiTableColumnIdx)column_n;
         table->InstanceInteracted = table->InstanceCurrent;
-        const ImGuiID context_menu_id = ImHashStr("##ContextMenu", 0, table->ID);
+        const ImGuiID context_menu_id = table->ID.push("##ContextMenu");
         OpenPopupEx(context_menu_id, ImGuiPopupFlags_None);
     }
 }
@@ -3389,7 +3389,7 @@ bool ImGui::TableBeginContextMenuPopup(ImGuiTable* table)
 {
     if (!table->IsContextPopupOpen || table->InstanceCurrent != table->InstanceInteracted)
         return false;
-    const ImGuiID context_menu_id = ImHashStr("##ContextMenu", 0, table->ID);
+    const ImGuiID context_menu_id = table->ID.push("##ContextMenu");
     if (BeginPopupEx(context_menu_id, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoSavedSettings))
         return true;
     table->IsContextPopupOpen = false;
@@ -3566,7 +3566,7 @@ ImGuiTableSettings* ImGui::TableGetBoundSettings(ImGuiTable* table)
         IM_ASSERT(settings->ID == table->ID);
         if (settings->ColumnsCountMax >= table->ColumnsCount)
             return settings; // OK
-        settings->ID = 0; // Invalidate storage, we won't fit because of a count change
+        settings->ID = ImGuiID::INVALID; // Invalidate storage, we won't fit because of a count change
     }
     return NULL;
 }
@@ -3703,9 +3703,9 @@ void ImGui::TableLoadSettings(ImGuiTable* table)
 static void TableSettingsHandler_ClearAll(ImGuiContext* ctx, ImGuiSettingsHandler*)
 {
     ImGuiContext& g = *ctx;
-    for (int i = 0; i != g.Tables.GetMapSize(); i++)
-        if (ImGuiTable* table = g.Tables.TryGetMapData(i))
-            table->SettingsOffset = -1;
+    for (ImGuiTable *table : g.Tables.DataView()) {
+        table->SettingsOffset = -1;
+    }
     g.SettingsTables.clear();
 }
 
@@ -3713,17 +3713,16 @@ static void TableSettingsHandler_ClearAll(ImGuiContext* ctx, ImGuiSettingsHandle
 static void TableSettingsHandler_ApplyAll(ImGuiContext* ctx, ImGuiSettingsHandler*)
 {
     ImGuiContext& g = *ctx;
-    for (int i = 0; i != g.Tables.GetMapSize(); i++)
-        if (ImGuiTable* table = g.Tables.TryGetMapData(i))
-        {
-            table->IsSettingsRequestLoad = true;
-            table->SettingsOffset = -1;
-        }
+    for (ImGuiTable* table : g.Tables.DataView())
+    {
+        table->IsSettingsRequestLoad = true;
+        table->SettingsOffset = -1;
+    }
 }
 
 static void* TableSettingsHandler_ReadOpen(ImGuiContext*, ImGuiSettingsHandler*, const char* name)
 {
-    ImGuiID id = 0;
+    ImGuiID id = ImGuiID::INVALID;
     int columns_count = 0;
     if (sscanf(name, "0x%08X,%d", &id, &columns_count) < 2)
         return NULL;
@@ -3735,7 +3734,7 @@ static void* TableSettingsHandler_ReadOpen(ImGuiContext*, ImGuiSettingsHandler*,
             TableSettingsInit(settings, id, columns_count, settings->ColumnsCountMax); // Recycle
             return settings;
         }
-        settings->ID = 0; // Invalidate storage, we won't fit because of a count change
+        settings->ID = ImGuiID::INVALID; // Invalidate storage, we won't fit because of a count change
     }
     return ImGui::TableSettingsCreate(id, columns_count);
 }
@@ -3757,7 +3756,7 @@ static void TableSettingsHandler_ReadLine(ImGuiContext*, ImGuiSettingsHandler*, 
         char c = 0;
         ImGuiTableColumnSettings* column = settings->GetColumnSettings() + column_n;
         column->Index = (ImGuiTableColumnIdx)column_n;
-        if (sscanf(line, "UserID=0x%08X%n", (ImU32*)&n, &r)==1) { line = ImStrSkipBlank(line + r); column->UserID = (ImGuiID)n; }
+        if (sscanf(line, "UserID=0x%08X%n", (ImU32*)&n, &r)==1) { line = ImStrSkipBlank(line + r); column->UserID = ImGuiID::specialValue(n); }
         if (sscanf(line, "Width=%d%n", &n, &r) == 1)            { line = ImStrSkipBlank(line + r); column->WidthOrWeight = (float)n; column->IsStretch = 0; settings->SaveFlags |= ImGuiTableFlags_Resizable; }
         if (sscanf(line, "Weight=%f%n", &f, &r) == 1)           { line = ImStrSkipBlank(line + r); column->WidthOrWeight = f; column->IsStretch = 1; settings->SaveFlags |= ImGuiTableFlags_Resizable; }
         if (sscanf(line, "Visible=%d%n", &n, &r) == 1)          { line = ImStrSkipBlank(line + r); column->IsEnabled = (ImU8)n; settings->SaveFlags |= ImGuiTableFlags_Hideable; }
@@ -3975,7 +3974,7 @@ void ImGui::DebugNodeTable(ImGuiTable* table)
 
 void ImGui::DebugNodeTableSettings(ImGuiTableSettings* settings)
 {
-    if (!TreeNode((void*)(intptr_t)settings->ID, "Settings 0x%08X (%d columns)", settings->ID, settings->ColumnsCount))
+    if (!TreeNode((void*)(intptr_t)settings->ID.hash_stack(), "Settings 0x%08X (%d columns)", settings->ID, settings->ColumnsCount))
         return;
     BulletText("SaveFlags: 0x%08X", settings->SaveFlags);
     BulletText("ColumnsCount: %d (max %d)", settings->ColumnsCount, settings->ColumnsCountMax);
@@ -4066,7 +4065,7 @@ static float GetDraggedColumnOffset(ImGuiOldColumns* columns, int column_index)
     ImGuiContext& g = *GImGui;
     ImGuiWindow* window = g.CurrentWindow;
     IM_ASSERT(column_index > 0); // We are not supposed to drag column 0.
-    IM_ASSERT(g.ActiveId == columns->ID + ImGuiID(column_index));
+    IM_ASSERT(g.ActiveId == columns->ID.push(column_index));
 
     float x = g.IO.MousePos.x - g.ActiveIdClickOffset.x + ImTrunc(COLUMNS_HIT_RECT_HALF_THICKNESS * g.CurrentDpiScale) - window->Pos.x;
     x = ImMax(x, ImGui::GetColumnOffset(column_index - 1) + g.Style.ColumnsMinSpacing);
@@ -4382,7 +4381,7 @@ void ImGui::EndColumns()
         {
             ImGuiOldColumnData* column = &columns->Columns[n];
             float x = window->Pos.x + GetColumnOffset(n);
-            const ImGuiID column_id = columns->ID + ImGuiID(n);
+            const ImGuiID column_id = columns->ID.push(n);
             const float column_hit_hw = ImTrunc(COLUMNS_HIT_RECT_HALF_THICKNESS * g.CurrentDpiScale);
             const ImRect column_hit_rect(ImVec2(x - column_hit_hw, y1), ImVec2(x + column_hit_hw, y2));
             if (!ItemAdd(column_hit_rect, column_id, NULL, ImGuiItemFlags_NoNav))

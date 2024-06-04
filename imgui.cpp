@@ -1020,6 +1020,8 @@ CODE
 #include <Windows.h>        // _wfopen, OpenClipboard
 #else
 #include <windows.h>
+
+#include <utility>
 #endif
 #if defined(WINAPI_FAMILY) && (WINAPI_FAMILY == WINAPI_FAMILY_APP || WINAPI_FAMILY == WINAPI_FAMILY_GAMES)
 // The UWP and GDK Win32 API subsets don't support clipboard nor IME functions
@@ -1166,9 +1168,87 @@ static void             RenderDimmedBackgrounds();
 static void             SetLastItemDataForWindow(ImGuiWindow* window, const ImRect& rect);
 
 // Viewports
-const ImGuiID           IMGUI_VIEWPORT_DEFAULT_ID = 0x11111111; // Using an arbitrary constant instead of e.g. ImHashStr("ViewportDefault", 0); so it's easier to spot in the debugger. The exact value doesn't matter.
+const ImGuiID           IMGUI_VIEWPORT_DEFAULT_ID = ImGuiID::ROOT;
 static void             UpdateViewportsNewFrame();
 
+}
+
+//-----------------------------------------------------------------------------
+// [SECTION] ImGuiID
+//-----------------------------------------------------------------------------
+
+ImGuiID ImGuiID::INVALID = ImGuiID(ImGuiID::Node{.id=0});
+
+ImGuiID ImGuiID::ROOT = ImGuiID(ImGuiID::Node{.id=1});
+
+ImGuiID::ImGuiID() : ImGuiID(ImGuiID::INVALID.node_) {}
+
+ImGuiID::ImGuiID(std::shared_ptr<Node> node) : node_(std::move(node)) {}
+
+ImGuiID::ImGuiID(const ImGuiID::Node& node) : ImGuiID(std::make_shared<Node>(node)) {}
+
+ImGuiID ImGuiID::push(ImGuiIDNum id) const
+{
+    return ImGuiID(Node{
+        .id = id,
+        .hash = ImHashData(&id, sizeof(id), node_->hash),
+        .parent = node_,
+    });
+}
+
+ImGuiID ImGuiID::push(const void *ptr) const
+{
+    return push(&ptr, sizeof(ptr));
+}
+
+ImGuiID ImGuiID::push(const char *string) const
+{
+    return push(ImHashStr(string));
+}
+
+ImGuiID ImGuiID::push(const char *string_begin, const char *string_end) const
+{
+    return push(ImHashStr(string_begin, string_end ? string_end - string_begin : 0));
+}
+
+ImGuiID ImGuiID::push(const void *data, size_t data_size) const
+{
+    return push(ImHashData(data, data_size));
+}
+
+bool ImGuiID::invalid() const
+{
+    auto &invalid_node = ImGuiID::INVALID.node_;
+    return node_ == invalid_node || node_->parent == invalid_node && node_->id == 0;
+}
+
+ImGuiID ImGuiID::pop() const
+{
+    IM_ASSERT(node_ != nullptr);
+    return ImGuiID(node_->parent);
+}
+
+bool operator==(const ImGuiID &id1, const ImGuiID &id2)
+{
+    ImGuiID::Node *node1 = id1.node_.get();
+    ImGuiID::Node *node2 = id2.node_.get();
+    while (node1 != node2) {
+        if (node1 == nullptr || node2 == nullptr) {
+            // One of them is nullptr, can't be equal anymore
+            return false;
+        }
+        if (node1->hash != node2->hash) {
+            // If hashes differ, they obviously also aren't equal
+            return false;
+        }
+        if (node1->id != node2->id) {
+            // Ids have to be equal in each level
+            return false;
+        }
+        node1 = node1->parent.get();
+        node2 = node2->parent.get();
+    }
+    return true;
 }
 
 //-----------------------------------------------------------------------------
@@ -2080,7 +2160,7 @@ static const ImU32 GCrc32LookupTable[256] =
 // Known size hash
 // It is ok to call ImHashData on a string with known length but the ### operator won't be supported.
 // FIXME-OPT: Replace with e.g. FNV1a hash? CRC32 pretty much randomly access 1KB. Need to do proper measurements.
-ImGuiID ImHashData(const void* data_p, size_t data_size, ImGuiID seed)
+ImGuiIDNum ImHashData(const void* data_p, size_t data_size, ImGuiIDNum seed)
 {
     ImU32 crc = ~seed;
     const unsigned char* data = (const unsigned char*)data_p;
@@ -2096,7 +2176,7 @@ ImGuiID ImHashData(const void* data_p, size_t data_size, ImGuiID seed)
 // - If we reach ### in the string we discard the hash so far and reset to the seed.
 // - We don't do 'current += 2; continue;' after handling ### to keep the code smaller/faster (measured ~10% diff in Debug build)
 // FIXME-OPT: Replace with e.g. FNV1a hash? CRC32 pretty much randomly access 1KB. Need to do proper measurements.
-ImGuiID ImHashStr(const char* data_p, size_t data_size, ImGuiID seed)
+ImGuiIDNum ImHashStr(const char* data_p, size_t data_size, ImGuiIDNum seed)
 {
     seed = ~seed;
     ImU32 crc = seed;
@@ -2499,51 +2579,17 @@ void ImGui::ColorConvertHSVtoRGB(float h, float s, float v, float& out_r, float&
 // Helper: Key->value storage
 //-----------------------------------------------------------------------------
 
-// std::lower_bound but without the bullshit
-static ImGuiStorage::ImGuiStoragePair* LowerBound(ImVector<ImGuiStorage::ImGuiStoragePair>& data, ImGuiID key)
-{
-    ImGuiStorage::ImGuiStoragePair* first = data.Data;
-    ImGuiStorage::ImGuiStoragePair* last = data.Data + data.Size;
-    size_t count = (size_t)(last - first);
-    while (count > 0)
-    {
-        size_t count2 = count >> 1;
-        ImGuiStorage::ImGuiStoragePair* mid = first + count2;
-        if (mid->key < key)
-        {
-            first = ++mid;
-            count -= count2 + 1;
-        }
-        else
-        {
-            count = count2;
-        }
-    }
-    return first;
-}
-
 // For quicker full rebuild of a storage (instead of an incremental one), you may add all your contents and then sort once.
 void ImGuiStorage::BuildSortByKey()
 {
-    struct StaticFunc
-    {
-        static int IMGUI_CDECL PairComparerByID(const void* lhs, const void* rhs)
-        {
-            // We can't just do a subtraction because qsort uses signed integers and subtracting our ID doesn't play well with that.
-            if (((const ImGuiStoragePair*)lhs)->key > ((const ImGuiStoragePair*)rhs)->key) return +1;
-            if (((const ImGuiStoragePair*)lhs)->key < ((const ImGuiStoragePair*)rhs)->key) return -1;
-            return 0;
-        }
-    };
-    ImQsort(Data.Data, (size_t)Data.Size, sizeof(ImGuiStoragePair), StaticFunc::PairComparerByID);
+    // Exists for compatibility
 }
 
 int ImGuiStorage::GetInt(ImGuiID key, int default_val) const
 {
-    ImGuiStoragePair* it = LowerBound(const_cast<ImVector<ImGuiStoragePair>&>(Data), key);
-    if (it == Data.end() || it->key != key)
-        return default_val;
-    return it->val_i;
+    auto it = Map.find(key);
+    if (it == Map.end()) return default_val;
+    return it->second.val_i;
 }
 
 bool ImGuiStorage::GetBool(ImGuiID key, bool default_val) const
@@ -2553,27 +2599,22 @@ bool ImGuiStorage::GetBool(ImGuiID key, bool default_val) const
 
 float ImGuiStorage::GetFloat(ImGuiID key, float default_val) const
 {
-    ImGuiStoragePair* it = LowerBound(const_cast<ImVector<ImGuiStoragePair>&>(Data), key);
-    if (it == Data.end() || it->key != key)
-        return default_val;
-    return it->val_f;
+    auto it = Map.find(key);
+    if (it == Map.end()) return default_val;
+    return it->second.val_f;
 }
 
 void* ImGuiStorage::GetVoidPtr(ImGuiID key) const
 {
-    ImGuiStoragePair* it = LowerBound(const_cast<ImVector<ImGuiStoragePair>&>(Data), key);
-    if (it == Data.end() || it->key != key)
-        return NULL;
-    return it->val_p;
+    auto it = Map.find(key);
+    if (it == Map.end()) return nullptr;
+    return it->second.val_p;
 }
 
 // References are only valid until a new value is added to the storage. Calling a Set***() function or a Get***Ref() function invalidates the pointer.
 int* ImGuiStorage::GetIntRef(ImGuiID key, int default_val)
 {
-    ImGuiStoragePair* it = LowerBound(Data, key);
-    if (it == Data.end() || it->key != key)
-        it = Data.insert(it, ImGuiStoragePair(key, default_val));
-    return &it->val_i;
+    return &Map.try_emplace(key, Value{.val_i=default_val}).first->second.val_i;
 }
 
 bool* ImGuiStorage::GetBoolRef(ImGuiID key, bool default_val)
@@ -2583,28 +2624,18 @@ bool* ImGuiStorage::GetBoolRef(ImGuiID key, bool default_val)
 
 float* ImGuiStorage::GetFloatRef(ImGuiID key, float default_val)
 {
-    ImGuiStoragePair* it = LowerBound(Data, key);
-    if (it == Data.end() || it->key != key)
-        it = Data.insert(it, ImGuiStoragePair(key, default_val));
-    return &it->val_f;
+    return &Map.try_emplace(key, Value{.val_f=default_val}).first->second.val_f;
 }
 
 void** ImGuiStorage::GetVoidPtrRef(ImGuiID key, void* default_val)
 {
-    ImGuiStoragePair* it = LowerBound(Data, key);
-    if (it == Data.end() || it->key != key)
-        it = Data.insert(it, ImGuiStoragePair(key, default_val));
-    return &it->val_p;
+    return &Map.try_emplace(key, Value{.val_p=default_val}).first->second.val_p;
 }
 
 // FIXME-OPT: Need a way to reuse the result of lower_bound when doing GetInt()/SetInt() - not too bad because it only happens on explicit interaction (maximum one a frame)
 void ImGuiStorage::SetInt(ImGuiID key, int val)
 {
-    ImGuiStoragePair* it = LowerBound(Data, key);
-    if (it == Data.end() || it->key != key)
-        Data.insert(it, ImGuiStoragePair(key, val));
-    else
-        it->val_i = val;
+    Map[key] = Value{.val_i = val};
 }
 
 void ImGuiStorage::SetBool(ImGuiID key, bool val)
@@ -2614,26 +2645,19 @@ void ImGuiStorage::SetBool(ImGuiID key, bool val)
 
 void ImGuiStorage::SetFloat(ImGuiID key, float val)
 {
-    ImGuiStoragePair* it = LowerBound(Data, key);
-    if (it == Data.end() || it->key != key)
-        Data.insert(it, ImGuiStoragePair(key, val));
-    else
-        it->val_f = val;
+    Map[key] = Value{.val_f = val};
 }
 
 void ImGuiStorage::SetVoidPtr(ImGuiID key, void* val)
 {
-    ImGuiStoragePair* it = LowerBound(Data, key);
-    if (it == Data.end() || it->key != key)
-        Data.insert(it, ImGuiStoragePair(key, val));
-    else
-        it->val_p = val;
+    Map[key] = Value{.val_p = val};
 }
 
 void ImGuiStorage::SetAllInt(int v)
 {
-    for (int i = 0; i < Data.Size; i++)
-        Data[i].val_i = v;
+    for (auto &entry : Map) {
+        entry.second = Value{.val_i = v};
+    }
 }
 
 //-----------------------------------------------------------------------------
@@ -3797,7 +3821,7 @@ void ImGui::Shutdown()
 }
 
 // No specific ordering/dependency support, will see as needed
-ImGuiID ImGui::AddContextHook(ImGuiContext* ctx, const ImGuiContextHook* hook)
+ImGuiIDNum ImGui::AddContextHook(ImGuiContext* ctx, const ImGuiContextHook* hook)
 {
     ImGuiContext& g = *ctx;
     IM_ASSERT(hook->Callback != NULL && hook->HookId == 0 && hook->Type != ImGuiContextHookType_PendingRemoval_);
@@ -3807,7 +3831,7 @@ ImGuiID ImGui::AddContextHook(ImGuiContext* ctx, const ImGuiContextHook* hook)
 }
 
 // Deferred removal, avoiding issue with changing vector while iterating it
-void ImGui::RemoveContextHook(ImGuiContext* ctx, ImGuiID hook_id)
+void ImGui::RemoveContextHook(ImGuiContext* ctx, ImGuiIDNum hook_id)
 {
     ImGuiContext& g = *ctx;
     IM_ASSERT(hook_id != 0);
@@ -3838,7 +3862,7 @@ ImGuiWindow::ImGuiWindow(ImGuiContext* ctx, const char* name) : DrawListInst(NUL
     Ctx = ctx;
     Name = ImStrdup(name);
     NameBufLen = (int)strlen(name) + 1;
-    ID = ImHashStr(name);
+    ID = IDStack.back().push(name); // IDStack == ImGuiID::ROOT
     IDStack.push_back(ID);
     MoveId = GetID("#MOVE");
     ScrollTarget = ImVec2(FLT_MAX, FLT_MAX);
@@ -3938,7 +3962,7 @@ void ImGui::SetActiveID(ImGuiID id, ImGuiWindow* window)
     g.ActiveIdIsJustActivated = (g.ActiveId != id);
     if (g.ActiveIdIsJustActivated)
     {
-        IMGUI_DEBUG_LOG_ACTIVEID("SetActiveID() old:0x%08X (window \"%s\") -> new:0x%08X (window \"%s\")\n", g.ActiveId, g.ActiveIdWindow ? g.ActiveIdWindow->Name : "", id, window ? window->Name : "");
+        IMGUI_DEBUG_LOG_ACTIVEID("SetActiveID() old:0x%08X (window \"%s\") -> new:0x%08X (window \"%s\")\n", g.ActiveId.hash_stack(), g.ActiveIdWindow ? g.ActiveIdWindow->Name : "", id.hash_stack(), window ? window->Name : "");
         g.ActiveIdTimer = 0.0f;
         g.ActiveIdHasBeenPressedBefore = false;
         g.ActiveIdHasBeenEditedBefore = false;
@@ -3955,7 +3979,7 @@ void ImGui::SetActiveID(ImGuiID id, ImGuiWindow* window)
     g.ActiveIdWindow = window;
     g.ActiveIdHasBeenEditedThisFrame = false;
     g.ActiveIdFromShortcut = false;
-    if (id)
+    if (id.valid())
     {
         g.ActiveIdIsAlive = id;
         g.ActiveIdSource = (g.NavActivateId == id || g.NavJustMovedToId == id) ? g.NavInputSource : ImGuiInputSource_Mouse;
@@ -3973,7 +3997,7 @@ void ImGui::SetActiveID(ImGuiID id, ImGuiWindow* window)
 
 void ImGui::ClearActiveID()
 {
-    SetActiveID(0, NULL); // g.ActiveId = 0;
+    SetActiveID(ImGuiID::INVALID, NULL); // g.ActiveId = 0;
 }
 
 void ImGui::SetHoveredID(ImGuiID id)
@@ -3988,7 +4012,7 @@ void ImGui::SetHoveredID(ImGuiID id)
 ImGuiID ImGui::GetHoveredID()
 {
     ImGuiContext& g = *GImGui;
-    return g.HoveredId ? g.HoveredId : g.HoveredIdPreviousFrame;
+    return g.HoveredId.valid() ? g.HoveredId : g.HoveredIdPreviousFrame;
 }
 
 void ImGui::MarkItemEdited(ImGuiID id)
@@ -4691,16 +4715,16 @@ void ImGui::NewFrame()
         KeepAliveID(g.DragDropPayload.SourceId);
 
     // Update HoveredId data
-    if (!g.HoveredIdPreviousFrame)
+    if (g.HoveredIdPreviousFrame.invalid())
         g.HoveredIdTimer = 0.0f;
-    if (!g.HoveredIdPreviousFrame || (g.HoveredId && g.ActiveId == g.HoveredId))
+    if (g.HoveredIdPreviousFrame.invalid() || (g.HoveredId.valid() && g.ActiveId == g.HoveredId))
         g.HoveredIdNotActiveTimer = 0.0f;
-    if (g.HoveredId)
+    if (g.HoveredId.valid())
         g.HoveredIdTimer += g.IO.DeltaTime;
-    if (g.HoveredId && g.ActiveId != g.HoveredId)
+    if (g.HoveredId.valid() && g.ActiveId != g.HoveredId)
         g.HoveredIdNotActiveTimer += g.IO.DeltaTime;
     g.HoveredIdPreviousFrame = g.HoveredId;
-    g.HoveredId = 0;
+    g.HoveredId = ImGuiID::INVALID;
     g.HoveredIdAllowOverlap = false;
     g.HoveredIdDisabled = false;
 
@@ -4714,18 +4738,18 @@ void ImGui::NewFrame()
     }
 
     // Update ActiveId data (clear reference to active widget if the widget isn't alive anymore)
-    if (g.ActiveId)
+    if (g.ActiveId.valid())
         g.ActiveIdTimer += g.IO.DeltaTime;
     g.LastActiveIdTimer += g.IO.DeltaTime;
     g.ActiveIdPreviousFrame = g.ActiveId;
     g.ActiveIdPreviousFrameWindow = g.ActiveIdWindow;
     g.ActiveIdPreviousFrameHasBeenEditedBefore = g.ActiveIdHasBeenEditedBefore;
-    g.ActiveIdIsAlive = 0;
+    g.ActiveIdIsAlive = ImGuiID::INVALID;
     g.ActiveIdHasBeenEditedThisFrame = false;
     g.ActiveIdPreviousFrameIsAlive = false;
     g.ActiveIdIsJustActivated = false;
     if (g.TempInputId != 0 && g.ActiveId != g.TempInputId)
-        g.TempInputId = 0;
+        g.TempInputId = ImGuiID::INVALID;
     if (g.ActiveId == 0)
     {
         g.ActiveIdUsingNavDirMask = 0x00;
@@ -4755,11 +4779,11 @@ void ImGui::NewFrame()
     if (g.HoverItemDelayId != 0 && g.MouseStationaryTimer >= g.Style.HoverStationaryDelay)
         g.HoverItemUnlockedStationaryId = g.HoverItemDelayId;
     else if (g.HoverItemDelayId == 0)
-        g.HoverItemUnlockedStationaryId = 0;
+        g.HoverItemUnlockedStationaryId = ImGuiID::INVALID;
     if (g.HoveredWindow != NULL && g.MouseStationaryTimer >= g.Style.HoverStationaryDelay)
         g.HoverWindowUnlockedStationaryId = g.HoveredWindow->ID;
     else if (g.HoveredWindow == NULL)
-        g.HoverWindowUnlockedStationaryId = 0;
+        g.HoverWindowUnlockedStationaryId = ImGuiID::INVALID;
 
     // Update hover delay for IsItemHovered() with delays and tooltips
     g.HoverItemDelayIdPreviousFrame = g.HoverItemDelayId;
@@ -4767,7 +4791,7 @@ void ImGui::NewFrame()
     {
         g.HoverItemDelayTimer += g.IO.DeltaTime;
         g.HoverItemDelayClearTimer = 0.0f;
-        g.HoverItemDelayId = 0;
+        g.HoverItemDelayId = ImGuiID::INVALID;
     }
     else if (g.HoverItemDelayTimer > 0.0f)
     {
@@ -4780,11 +4804,11 @@ void ImGui::NewFrame()
 
     // Drag and drop
     g.DragDropAcceptIdPrev = g.DragDropAcceptIdCurr;
-    g.DragDropAcceptIdCurr = 0;
+    g.DragDropAcceptIdCurr = ImGuiID::INVALID;
     g.DragDropAcceptIdCurrRectSurface = FLT_MAX;
     g.DragDropWithinSource = false;
     g.DragDropWithinTarget = false;
-    g.DragDropHoldJustPressedId = 0;
+    g.DragDropHoldJustPressedId = ImGuiID::INVALID;
 
     // Close popups on focus lost (currently wip/opt-in)
     //if (g.IO.AppFocusLost)
@@ -4873,7 +4897,7 @@ void ImGui::NewFrame()
     UpdateDebugToolFlashStyleColor();
     if (g.DebugLocateFrames > 0 && --g.DebugLocateFrames == 0)
     {
-        g.DebugLocateId = 0;
+        g.DebugLocateId = ImGuiID::INVALID;
         g.DebugBreakInLocateId = false;
     }
     if (g.DebugLogAutoDisableFrames > 0 && --g.DebugLogAutoDisableFrames == 0)
@@ -5343,7 +5367,7 @@ void ImGui::FindHoveredWindowEx(const ImVec2& pos, bool find_first_and_in_any_vi
 bool ImGui::IsItemActive()
 {
     ImGuiContext& g = *GImGui;
-    if (g.ActiveId)
+    if (g.ActiveId.valid())
         return g.ActiveId == g.LastItemData.ID;
     return false;
 }
@@ -5351,7 +5375,7 @@ bool ImGui::IsItemActive()
 bool ImGui::IsItemActivated()
 {
     ImGuiContext& g = *GImGui;
-    if (g.ActiveId)
+    if (g.ActiveId.valid())
         if (g.ActiveId == g.LastItemData.ID && g.ActiveIdPreviousFrame != g.LastItemData.ID)
             return true;
     return false;
@@ -5596,7 +5620,7 @@ bool ImGui::BeginChildEx(const char* name, ImGuiID id, const ImVec2& size_arg, I
 
     // Process navigation-in immediately so NavInit can run on first frame
     // Can enter a child if (A) it has navigable items or (B) it can be scrolled.
-    const ImGuiID temp_id_for_activation = ImHashStr("##Child", 0, id);
+    const ImGuiID temp_id_for_activation = id.push("##Child");
     if (g.ActiveId == temp_id_for_activation)
         ClearActiveID();
     if (g.NavActivateId == id && !(window_flags & ImGuiWindowFlags_NavFlattened) && (child_window->DC.NavLayersActiveMask != 0 || child_window->DC.NavWindowHasScrollY))
@@ -5667,7 +5691,7 @@ ImGuiWindow* ImGui::FindWindowByID(ImGuiID id)
 
 ImGuiWindow* ImGui::FindWindowByName(const char* name)
 {
-    ImGuiID id = ImHashStr(name);
+    ImGuiID id = ImGuiID::ROOT.push(name);
     return FindWindowByID(id);
 }
 
@@ -5952,8 +5976,8 @@ ImGuiID ImGui::GetWindowResizeCornerID(ImGuiWindow* window, int n)
 {
     IM_ASSERT(n >= 0 && n < 4);
     ImGuiID id = window->ID;
-    id = ImHashStr("#RESIZE", 0, id);
-    id = ImHashData(&n, sizeof(int), id);
+    id = id.push("#RESIZE");
+    id = id.push(n);
     return id;
 }
 
@@ -5963,8 +5987,8 @@ ImGuiID ImGui::GetWindowResizeBorderID(ImGuiWindow* window, ImGuiDir dir)
     IM_ASSERT(dir >= 0 && dir < 4);
     int n = (int)dir + 4;
     ImGuiID id = window->ID;
-    id = ImHashStr("#RESIZE", 0, id);
-    id = ImHashData(&n, sizeof(int), id);
+    id = id.push("#RESIZE");
+    id = id.push(n);
     return id;
 }
 
@@ -7394,9 +7418,9 @@ void ImGui::FocusWindow(ImGuiWindow* window, ImGuiFocusRequestFlags flags)
         SetNavWindow(window);
         if (window && g.NavDisableMouseHover)
             g.NavMousePosDirty = true;
-        g.NavId = window ? window->NavLastIds[0] : 0; // Restore NavId
+        g.NavId = window ? window->NavLastIds[0] : ImGuiID::INVALID; // Restore NavId
         g.NavLayer = ImGuiNavLayer_Main;
-        SetNavFocusScope(window ? window->NavRootFocusScopeId : 0);
+        SetNavFocusScope(window ? window->NavRootFocusScopeId : ImGuiID::INVALID);
         g.NavIdIsAlive = false;
         g.NavLastValidSelectionUserData = ImGuiSelectionUserData_Invalid;
 
@@ -8037,7 +8061,7 @@ void ImGui::PopFocusScope()
         return;
     }
     g.FocusScopeStack.pop_back();
-    g.CurrentFocusScopeId = g.FocusScopeStack.Size ? g.FocusScopeStack.back().ID : 0;
+    g.CurrentFocusScopeId = g.FocusScopeStack.Size ? g.FocusScopeStack.back().ID : ImGuiID::INVALID;
 }
 
 void ImGui::SetNavFocusScope(ImGuiID focus_scope_id)
@@ -8178,8 +8202,7 @@ bool ImGui::IsRectVisible(const ImVec2& rect_min, const ImVec2& rect_max)
 // it should ideally be flattened at some point but it's been used a lots by widgets.
 ImGuiID ImGuiWindow::GetID(const char* str, const char* str_end)
 {
-    ImGuiID seed = IDStack.back();
-    ImGuiID id = ImHashStr(str, str_end ? (str_end - str) : 0, seed);
+    ImGuiID id = IDStack.back().push(str, str_end);
 #ifndef IMGUI_DISABLE_DEBUG_TOOLS
     ImGuiContext& g = *Ctx;
     if (g.DebugHookIdInfo == id)
@@ -8190,8 +8213,7 @@ ImGuiID ImGuiWindow::GetID(const char* str, const char* str_end)
 
 ImGuiID ImGuiWindow::GetID(const void* ptr)
 {
-    ImGuiID seed = IDStack.back();
-    ImGuiID id = ImHashData(&ptr, sizeof(void*), seed);
+    ImGuiID id = IDStack.back().push(ptr);
 #ifndef IMGUI_DISABLE_DEBUG_TOOLS
     ImGuiContext& g = *Ctx;
     if (g.DebugHookIdInfo == id)
@@ -8202,8 +8224,7 @@ ImGuiID ImGuiWindow::GetID(const void* ptr)
 
 ImGuiID ImGuiWindow::GetID(int n)
 {
-    ImGuiID seed = IDStack.back();
-    ImGuiID id = ImHashData(&n, sizeof(n), seed);
+    ImGuiID id = IDStack.back().push(n); // TODO: Hash here? Does scoping take care of the hashing here?
 #ifndef IMGUI_DISABLE_DEBUG_TOOLS
     ImGuiContext& g = *Ctx;
     if (g.DebugHookIdInfo == id)
@@ -8217,7 +8238,7 @@ ImGuiID ImGuiWindow::GetIDFromRectangle(const ImRect& r_abs)
 {
     ImGuiID seed = IDStack.back();
     ImRect r_rel = ImGui::WindowRectAbsToRel(this, r_abs);
-    ImGuiID id = ImHashData(&r_rel, sizeof(r_rel), seed);
+    ImGuiID id = seed.push(&r_rel, sizeof(r_rel));
     return id;
 }
 
@@ -8270,7 +8291,7 @@ void ImGui::PushOverrideID(ImGuiID id)
 //  for that to work we would need to do PushOverrideID() -> ItemAdd() -> PopID() which would alter widget code a little more)
 ImGuiID ImGui::GetIDWithSeed(const char* str, const char* str_end, ImGuiID seed)
 {
-    ImGuiID id = ImHashStr(str, str_end ? (str_end - str) : 0, seed);
+    ImGuiID id = seed.push(str, str_end);
 #ifndef IMGUI_DISABLE_DEBUG_TOOLS
     ImGuiContext& g = *GImGui;
     if (g.DebugHookIdInfo == id)
@@ -8281,7 +8302,7 @@ ImGuiID ImGui::GetIDWithSeed(const char* str, const char* str_end, ImGuiID seed)
 
 ImGuiID ImGui::GetIDWithSeed(int n, ImGuiID seed)
 {
-    ImGuiID id = ImHashData(&n, sizeof(n), seed);
+    ImGuiID id = seed.push(n);
 #ifndef IMGUI_DISABLE_DEBUG_TOOLS
     ImGuiContext& g = *GImGui;
     if (g.DebugHookIdInfo == id)
@@ -10615,7 +10636,7 @@ void ImGui::EndGroup()
     // It would be neater if we replaced window.DC.LastItemId by e.g. 'bool LastItemIsActive', but would put a little more burden on individual widgets.
     // Also if you grep for LastItemId you'll notice it is only used in that context.
     // (The two tests not the same because ActiveIdIsAlive is an ID itself, in order to be able to handle ActiveId being overwritten during the frame.)
-    const bool group_contains_curr_active_id = (group_data.BackupActiveIdIsAlive != g.ActiveId) && (g.ActiveIdIsAlive == g.ActiveId) && g.ActiveId;
+    const bool group_contains_curr_active_id = (group_data.BackupActiveIdIsAlive != g.ActiveId) && (g.ActiveIdIsAlive == g.ActiveId) && g.ActiveId.valid();
     const bool group_contains_prev_active_id = (group_data.BackupActiveIdPreviousFrameIsAlive == false) && (g.ActiveIdPreviousFrameIsAlive == true);
     if (group_contains_curr_active_id)
         g.LastItemData.ID = g.ActiveId;
@@ -11018,7 +11039,7 @@ bool ImGui::IsPopupOpen(ImGuiID id, ImGuiPopupFlags popup_flags)
 bool ImGui::IsPopupOpen(const char* str_id, ImGuiPopupFlags popup_flags)
 {
     ImGuiContext& g = *GImGui;
-    ImGuiID id = (popup_flags & ImGuiPopupFlags_AnyPopupId) ? 0 : g.CurrentWindow->GetID(str_id);
+    ImGuiID id = (popup_flags & ImGuiPopupFlags_AnyPopupId) ? ImGuiID::INVALID : g.CurrentWindow->GetID(str_id);
     if ((popup_flags & ImGuiPopupFlags_AnyPopupLevel) && id != 0)
         IM_ASSERT(0 && "Cannot use IsPopupOpen() with a string id and ImGuiPopupFlags_AnyPopupLevel."); // But non-string version is legal and used internally
     return IsPopupOpen(id, popup_flags);
@@ -12268,7 +12289,7 @@ static void ImGui::NavUpdate()
     if (g.NavHighlightActivatedTimer > 0.0f)
         g.NavHighlightActivatedTimer = ImMax(0.0f, g.NavHighlightActivatedTimer - io.DeltaTime);
     if (g.NavHighlightActivatedTimer == 0.0f)
-        g.NavHighlightActivatedId = 0;
+        g.NavHighlightActivatedId = ImGuiID::INVALID;
 
     // Process programmatic activation request
     // FIXME-NAV: Those should eventually be queued (unlike focus they don't cancel each others)
@@ -12277,7 +12298,7 @@ static void ImGui::NavUpdate()
         g.NavActivateId = g.NavActivateDownId = g.NavActivatePressedId = g.NavNextActivateId;
         g.NavActivateFlags = g.NavNextActivateFlags;
     }
-    g.NavNextActivateId = 0;
+    g.NavNextActivateId = ImGuiID::INVALID;
 
     // Process move requests
     NavUpdateCreateMoveRequest();
@@ -14651,10 +14672,9 @@ void ImGui::ShowMetricsWindow(bool* p_open)
         cfg->ShowTablesRects |= Combo("##show_table_rects_type", &cfg->ShowTablesRectsType, trt_rects_names, TRT_Count, TRT_Count);
         if (cfg->ShowTablesRects && g.NavWindow != NULL)
         {
-            for (int table_n = 0; table_n < g.Tables.GetMapSize(); table_n++)
+            for (ImGuiTable *table : g.Tables.DataView())
             {
-                ImGuiTable* table = g.Tables.TryGetMapData(table_n);
-                if (table == NULL || table->LastFrameActive < g.FrameCount - 1 || (table->OuterWindow != g.NavWindow && table->InnerWindow != g.NavWindow))
+                if (table->LastFrameActive < g.FrameCount - 1 || (table->OuterWindow != g.NavWindow && table->InnerWindow != g.NavWindow))
                     continue;
 
                 BulletText("Table 0x%08X (%d columns, in '%s')", table->ID, table->ColumnsCount, table->OuterWindow->Name);
@@ -14782,22 +14802,20 @@ void ImGui::ShowMetricsWindow(bool* p_open)
     // Details for TabBars
     if (TreeNode("TabBars", "Tab Bars (%d)", g.TabBars.GetAliveCount()))
     {
-        for (int n = 0; n < g.TabBars.GetMapSize(); n++)
-            if (ImGuiTabBar* tab_bar = g.TabBars.TryGetMapData(n))
-            {
-                PushID(tab_bar);
-                DebugNodeTabBar(tab_bar, "TabBar");
-                PopID();
-            }
+        for (ImGuiTabBar* tab_bar : g.TabBars.DataView())
+        {
+            PushID(tab_bar);
+            DebugNodeTabBar(tab_bar, "TabBar");
+            PopID();
+        }
         TreePop();
     }
 
     // Details for Tables
     if (TreeNode("Tables", "Tables (%d)", g.Tables.GetAliveCount()))
     {
-        for (int n = 0; n < g.Tables.GetMapSize(); n++)
-            if (ImGuiTable* table = g.Tables.TryGetMapData(n))
-                DebugNodeTable(table);
+        for (ImGuiTable* table : g.Tables.DataView())
+            DebugNodeTable(table);
         TreePop();
     }
 
@@ -15068,9 +15086,8 @@ void ImGui::ShowMetricsWindow(bool* p_open)
     // Overlay: Display Tables Rectangles
     if (cfg->ShowTablesRects)
     {
-        for (int table_n = 0; table_n < g.Tables.GetMapSize(); table_n++)
+        for (ImGuiTable* table : g.Tables.DataView())
         {
-            ImGuiTable* table = g.Tables.TryGetMapData(table_n);
             if (table == NULL || table->LastFrameActive < g.FrameCount - 1)
                 continue;
             ImDrawList* draw_list = GetForegroundDrawList(table->OuterWindow);
@@ -15411,10 +15428,10 @@ void ImGui::DebugNodeFontGlyph(ImFont*, const ImFontGlyph* glyph)
 // [DEBUG] Display contents of ImGuiStorage
 void ImGui::DebugNodeStorage(ImGuiStorage* storage, const char* label)
 {
-    if (!TreeNode(label, "%s: %d entries, %d bytes", label, storage->Data.Size, storage->Data.size_in_bytes()))
+    if (!TreeNode(label, "%s: %d entries, %d bytes", label, storage->Map.size(), storage->Map.size() * sizeof(ImGuiStorage::MapType::node_type)))
         return;
-    for (const ImGuiStorage::ImGuiStoragePair& p : storage->Data)
-        BulletText("Key 0x%08X Value { i: %d }", p.key, p.val_i); // Important: we currently don't store a type, real value may not be integer.
+    for (const auto& p : storage->Map)
+        BulletText("Key 0x%08X Value { i: %d }", p.first.hash_stack(), p.second.val_i); // Important: we currently don't store a type, real value may not be integer.
     TreePop();
 }
 
@@ -16001,7 +16018,7 @@ void ImGui::ShowIDStackToolWindow(bool* p_open)
         {
             ImGuiStackLevelInfo* info = &tool->Results[n];
             TableNextColumn();
-            Text("0x%08X", (n > 0) ? tool->Results[n - 1].ID : 0);
+            Text("0x%08X", (n > 0) ? tool->Results[n - 1].ID : ImGuiID::INVALID);
             TableNextColumn();
             StackToolFormatLevelInfo(tool, n, true, g.TempBuffer.Data, g.TempBuffer.Size);
             TextUnformatted(g.TempBuffer.Data);
